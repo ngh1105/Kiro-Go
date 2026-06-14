@@ -38,6 +38,8 @@ type Handler struct {
 	modelsCacheTime int64
 	promptCache     *promptCacheTracker
 	tokenRefreshMu  sync.Mutex
+	// 会话粘性：apiKeyID → accountID
+	sessionAffinity sync.Map
 }
 
 type thinkingStreamSource int
@@ -867,7 +869,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 	}
 
 	for attempt := 0; attempt < maxAccountRetryAttempts; attempt++ {
-		account := h.pool.GetNextForModelExcluding(model, excluded)
+		account := h.getAffinityAccount(apiKeyID, model, excluded)
 		if account == nil {
 			break
 		}
@@ -875,6 +877,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			lastErr = err
 			excluded[account.ID] = true
 			h.handleAccountFailure(account, err)
+			h.sessionAffinity.Delete(apiKeyID)
 			continue
 		}
 		cacheUsage := h.promptCache.Compute(account.ID, cacheProfile)
@@ -1339,13 +1342,45 @@ func (h *Handler) recordFailure() {
 	atomic.AddInt64(&h.failedRequests, 1)
 }
 
+// getAffinityAccount implements session affinity: returns the previously-bound
+// account for the given apiKeyID if still available, otherwise falls back to
+// weighted round-robin and remembers the new assignment.
+func (h *Handler) getAffinityAccount(apiKeyID, model string, excluded map[string]bool) *config.Account {
+	// 1. Try sticky account
+	if apiKeyID != "" {
+		if accID, ok := h.sessionAffinity.Load(apiKeyID); ok {
+			id := accID.(string)
+			if !excluded[id] {
+				acc := h.pool.GetByID(id)
+				if acc != nil && acc.Enabled {
+					logger.Debugf("[Affinity] Hit: apiKey=%s → account=%s", apiKeyID[:8], acc.Email)
+					return acc
+				}
+			}
+			// Bound account unavailable, clear binding
+			h.sessionAffinity.Delete(apiKeyID)
+			logger.Debugf("[Affinity] Cleared stale binding for apiKey=%s", apiKeyID[:8])
+		}
+	}
+
+	// 2. Fallback to normal round-robin
+	acc := h.pool.GetNextForModelExcluding(model, excluded)
+
+	// 3. Remember the new assignment
+	if acc != nil && apiKeyID != "" {
+		h.sessionAffinity.Store(apiKeyID, acc.ID)
+		logger.Debugf("[Affinity] New binding: apiKey=%s → account=%s", apiKeyID[:8], acc.Email)
+	}
+	return acc
+}
+
 // handleClaudeNonStream Claude 非流式响应
 func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID string) {
 	excluded := make(map[string]bool)
 	var lastErr error
 
 	for attempt := 0; attempt < maxAccountRetryAttempts; attempt++ {
-		account := h.pool.GetNextForModelExcluding(model, excluded)
+		account := h.getAffinityAccount(apiKeyID, model, excluded)
 		if account == nil {
 			break
 		}
@@ -1353,6 +1388,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 			lastErr = err
 			excluded[account.ID] = true
 			h.handleAccountFailure(account, err)
+			h.sessionAffinity.Delete(apiKeyID)
 			continue
 		}
 		cacheUsage := h.promptCache.Compute(account.ID, cacheProfile)
@@ -1530,7 +1566,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 	var lastErr error
 
 	for attempt := 0; attempt < maxAccountRetryAttempts; attempt++ {
-		account := h.pool.GetNextForModelExcluding(model, excluded)
+		account := h.getAffinityAccount(apiKeyID, model, excluded)
 		if account == nil {
 			break
 		}
@@ -1538,6 +1574,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 			lastErr = err
 			excluded[account.ID] = true
 			h.handleAccountFailure(account, err)
+			h.sessionAffinity.Delete(apiKeyID)
 			continue
 		}
 
@@ -1905,7 +1942,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 	var lastErr error
 
 	for attempt := 0; attempt < maxAccountRetryAttempts; attempt++ {
-		account := h.pool.GetNextForModelExcluding(model, excluded)
+		account := h.getAffinityAccount(apiKeyID, model, excluded)
 		if account == nil {
 			break
 		}
@@ -1913,6 +1950,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 			lastErr = err
 			excluded[account.ID] = true
 			h.handleAccountFailure(account, err)
+			h.sessionAffinity.Delete(apiKeyID)
 			continue
 		}
 
