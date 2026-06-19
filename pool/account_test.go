@@ -325,3 +325,94 @@ func TestReloadDropsOverQuotaAccountWhenAllowOverUsageDisabled(t *testing.T) {
 		t.Fatalf("expected over-quota account to be dropped, got %q", got.ID)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// CircuitBreaker tests
+// ---------------------------------------------------------------------------
+
+func TestCircuitBreakerTransitions(t *testing.T) {
+	b := NewCircuitBreaker(3, 30*time.Second, 300*time.Second, 3600*time.Second)
+
+	if !b.CanRoute() {
+		t.Fatal("expected CLOSED breaker to route")
+	}
+	if b.StateString() != "CLOSED" {
+		t.Fatalf("expected CLOSED, got %s", b.StateString())
+	}
+
+	for i := 0; i < 3; i++ {
+		b.Transition(errors.New("connection refused"), "transient")
+	}
+	if b.CanRoute() {
+		t.Fatal("expected OPEN breaker to block")
+	}
+	if b.StateString() != "OPEN" {
+		t.Fatalf("expected OPEN, got %s", b.StateString())
+	}
+}
+
+func TestCircuitBreakerHalfOpenRecovery(t *testing.T) {
+	b := NewCircuitBreaker(3, 30*time.Second, 300*time.Second, 3600*time.Second)
+	for i := 0; i < 3; i++ {
+		b.Transition(errors.New("timeout"), "transient")
+	}
+	b.openAt = time.Now().Add(-31 * time.Second)
+
+	if !b.CanRoute() {
+		t.Fatal("expected HALF_OPEN breaker to route after timeout")
+	}
+	if b.StateString() != "HALF_OPEN" {
+		t.Fatalf("expected HALF_OPEN, got %s", b.StateString())
+	}
+
+	b.Transition(nil, "")
+	if b.StateString() != "CLOSED" {
+		t.Fatalf("expected CLOSED after success, got %s", b.StateString())
+	}
+}
+
+func TestCircuitBreakerHalfOpenFailure(t *testing.T) {
+	b := NewCircuitBreaker(3, 30*time.Second, 300*time.Second, 3600*time.Second)
+	for i := 0; i < 3; i++ {
+		b.Transition(errors.New("timeout"), "transient")
+	}
+	b.openAt = time.Now().Add(-31 * time.Second)
+	b.CanRoute()
+
+	b.Transition(errors.New("still failing"), "transient")
+	if b.StateString() != "OPEN" {
+		t.Fatalf("expected OPEN after HALF_OPEN failure, got %s", b.StateString())
+	}
+}
+
+func TestCircuitBreakerQuotaErrorLongerTimeout(t *testing.T) {
+	b := NewCircuitBreaker(3, 30*time.Second, 300*time.Second, 3600*time.Second)
+	for i := 0; i < 3; i++ {
+		b.Transition(errors.New("402 Payment Required"), "quota")
+	}
+	if b.openTimeout != 300*time.Second {
+		t.Fatalf("expected 300s quota timeout, got %v", b.openTimeout)
+	}
+}
+
+func TestCircuitBreakerAuthFailureTerminal(t *testing.T) {
+	b := NewCircuitBreaker(3, 30*time.Second, 300*time.Second, 3600*time.Second)
+	b.Transition(errors.New("HTTP 401 Unauthorized"), "auth")
+	if b.StateString() != "DISABLED" {
+		t.Fatalf("expected DISABLED after auth failure, got %s", b.StateString())
+	}
+	if b.CanRoute() {
+		t.Fatal("expected DISABLED breaker to block permanently")
+	}
+}
+
+func TestCircuitBreakerReset(t *testing.T) {
+	b := NewCircuitBreaker(3, 30*time.Second, 300*time.Second, 3600*time.Second)
+	for i := 0; i < 3; i++ {
+		b.Transition(errors.New("fail"), "transient")
+	}
+	b.Reset()
+	if b.StateString() != "CLOSED" {
+		t.Fatalf("expected CLOSED after Reset, got %s", b.StateString())
+	}
+}
