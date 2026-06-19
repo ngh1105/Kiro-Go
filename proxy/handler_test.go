@@ -88,6 +88,7 @@ func TestClaudeNonStreamRetriesNextAccountAfterPreResponseFailure(t *testing.T) 
 	h := &Handler{
 		pool:        p,
 		promptCache: newPromptCacheTracker(defaultPromptCacheTTL),
+		requestLogs: NewLogStore(0),
 	}
 
 	payload := &KiroPayload{}
