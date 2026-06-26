@@ -5,32 +5,6 @@ import (
 	"testing"
 )
 
-// TestParseRegionFromProfileArn covers region extraction from real and malformed
-// CodeWhisperer/Kiro profile ARNs. The ARN's region drives every regionalized
-// data-plane call, so a wrong parse silently sends traffic to the wrong region.
-func TestParseRegionFromProfileArn(t *testing.T) {
-	cases := []struct {
-		name string
-		arn  string
-		want string
-	}{
-		{"eu-central-1 profile", "arn:aws:codewhisperer:eu-central-1:123456789012:profile/ABCDEF123456", "eu-central-1"},
-		{"us-east-1 profile", "arn:aws:codewhisperer:us-east-1:123456789012:profile/ABCDEF123456", "us-east-1"},
-		{"surrounding whitespace", "  arn:aws:codewhisperer:ap-southeast-2:1:profile/X  ", "ap-southeast-2"},
-		{"empty", "", ""},
-		{"not an arn", "https://q.eu-central-1.amazonaws.com", ""},
-		{"too few segments", "arn:aws:codewhisperer", ""},
-		{"missing region", "arn:aws:codewhisperer::123456789012:profile/X", ""},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := parseRegionFromProfileArn(tc.arn); got != tc.want {
-				t.Fatalf("parseRegionFromProfileArn(%q) = %q, want %q", tc.arn, got, tc.want)
-			}
-		})
-	}
-}
-
 // TestRegionalizeURLForRegion asserts that a non-us-east-1 region collapses BOTH
 // hardcoded us-east-1 hosts (q.* and codewhisperer.*) onto q.{region} — there is no
 // codewhisperer.{region} host — and that us-east-1/empty are no-ops.

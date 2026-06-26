@@ -519,23 +519,6 @@ func UpdateAccountProfileArn(id, profileArn string) error {
 	return nil
 }
 
-// UpdateAccountRegion persists a home region discovered after login. An account's
-// Kiro profile only resolves against its own region, but the login flow cannot know
-// it up front — Azure-tenant (external_idp) logins default to us-east-1 — so the
-// region is detected from the resolved profile ARN on first use (see
-// parseRegionFromProfileArn) and written back here. A no-op for an unknown id.
-func UpdateAccountRegion(id, region string) error {
-	cfgLock.Lock()
-	defer cfgLock.Unlock()
-	for i, a := range cfg.Accounts {
-		if a.ID == id {
-			cfg.Accounts[i].Region = region
-			return Save()
-		}
-	}
-	return nil
-}
-
 func DeleteAccount(id string) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
