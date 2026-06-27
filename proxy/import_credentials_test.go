@@ -363,3 +363,51 @@ func TestApiImportCredentialsExternalIdpPreservesFullRecordIdentity(t *testing.T
 		t.Fatalf("ProfileArn: want preserved, got %q", got.ProfileArn)
 	}
 }
+
+// TestApiImportCredentialsExternalIdpDerivesEndpointsFromUserId verifies the
+// Kiro Account Manager export shape: a credential carrying only refreshToken +
+// clientId + userId (NO tokenEndpoint/issuerUrl/scopes) is accepted, with the
+// endpoints+scopes derived from userId's embedded Azure tenant.
+func TestApiImportCredentialsExternalIdpDerivesEndpointsFromUserId(t *testing.T) {
+	cfgFile := t.TempDir() + "/config.json"
+	if err := config.Init(cfgFile); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	defer installCleanAuthClient(t)()
+
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"access_token":"at-derived","refresh_token":"rt-d2","expires_in":3600}`)
+	}))
+	defer fake.Close()
+
+	restore := auth.SetExternalIdpValidatorForTest(func(string) error { return nil })
+	defer auth.SetExternalIdpValidatorForTest(restore)
+
+	h := &Handler{pool: accountpool.GetPool()}
+
+	// userId points at the fake so the derived tokenEndpoint hits it.
+	userID := fake.URL + "/5fbc183e-3d09-4043-b36f-0c49d3665977/v2.0.8db0e2eb-d491-4a1a-98f1-cbdc12bb60a0"
+	body := fmt.Sprintf(`{"authMethod":"external_idp","refreshToken":"rt","clientId":"fa6d79bf-cdaa-495e-8359-78aab7c7cd9b","userId":%q,"region":"eu-central-1"}`, userID)
+	req := httptest.NewRequest("POST", "/auth/credentials", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.apiImportCredentials(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	got := config.GetAccounts()[0]
+	wantTE := fake.URL + "/5fbc183e-3d09-4043-b36f-0c49d3665977/oauth2/v2.0/token"
+	if got.TokenEndpoint != wantTE {
+		t.Fatalf("derived TokenEndpoint: want %q, got %q", wantTE, got.TokenEndpoint)
+	}
+	if got.IssuerURL != fake.URL+"/5fbc183e-3d09-4043-b36f-0c49d3665977/v2.0" {
+		t.Fatalf("derived IssuerURL: got %q", got.IssuerURL)
+	}
+	if !strings.Contains(got.Scopes, "codewhisperer:conversations") || !strings.Contains(got.Scopes, "offline_access") {
+		t.Fatalf("derived Scopes: got %q", got.Scopes)
+	}
+	if got.AccessToken != "at-derived" {
+		t.Fatalf("AccessToken: want at-derived, got %q", got.AccessToken)
+	}
+}

@@ -249,3 +249,26 @@ func TestSetExternalIdpValidatorForTestSwapsAndRestores(t *testing.T) {
 		t.Fatalf("expected swapped no-op validator to accept, got %v", err)
 	}
 }
+
+// TestDeriveExternalIdpEndpoints verifies the endpoints+scopes are reconstructed
+// from a Kiro userId (which embeds the Azure tenant) + the Kiro client ID. This is
+// what lets the import path accept Kiro Account Manager exports, whose credentials
+// block omits tokenEndpoint/issuerUrl/scopes.
+func TestDeriveExternalIdpEndpoints(t *testing.T) {
+	const userID = "https://login.microsoftonline.com/5fbc183e-3d09-4043-b36f-0c49d3665977/v2.0.8db0e2eb-d491-4a1a-98f1-cbdc12bb60a0"
+	const clientID = "fa6d79bf-cdaa-495e-8359-78aab7c7cd9b"
+	te, iss, sc := DeriveExternalIdpEndpoints(userID, clientID)
+	if te != "https://login.microsoftonline.com/5fbc183e-3d09-4043-b36f-0c49d3665977/oauth2/v2.0/token" {
+		t.Fatalf("tokenEndpoint: got %q", te)
+	}
+	if iss != "https://login.microsoftonline.com/5fbc183e-3d09-4043-b36f-0c49d3665977/v2.0" {
+		t.Fatalf("issuerURL: got %q", iss)
+	}
+	if !strings.Contains(sc, "api://"+clientID+"/codewhisperer:conversations") || !strings.Contains(sc, "offline_access") {
+		t.Fatalf("scopes: got %q", sc)
+	}
+	// Empty / unparseable userId → all-empty (caller falls back to its 400).
+	if te2, iss2, sc2 := DeriveExternalIdpEndpoints("", clientID); te2 != "" || iss2 != "" || sc2 != "" {
+		t.Fatalf("empty userId should yield all-empty, got %q %q %q", te2, iss2, sc2)
+	}
+}

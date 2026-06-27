@@ -3022,6 +3022,9 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		ID         string `json:"id"`
 		Email      string `json:"email"`
 		ProfileArn string `json:"profileArn"`
+		// userId (account-level in Kiro Account Manager exports) embeds the Azure
+		// tenant, from which tokenEndpoint/issuerUrl/scopes are derived when missing.
+		UserID string `json:"userId"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -3046,9 +3049,25 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 	// external_idp 的 tokenEndpoint 是用户可填的新信任边界：必须经 allow-list 校验，
 	// 否则一份不信任的 credential JSON 可指向内网/攻击者主机，导致 refresh token 被外泄。
 	if req.AuthMethod == "external_idp" {
+		// Kiro Account Manager exports carry refreshToken + clientId (and userId at
+		// account level) but omit tokenEndpoint/issuerUrl/scopes. Derive them from
+		// userId (which embeds the Azure tenant) + the Kiro client ID, then re-validate
+		// against the allow-list below.
+		if req.TokenEndpoint == "" || req.IssuerURL == "" || req.Scopes == "" {
+			te, iss, sc := auth.DeriveExternalIdpEndpoints(req.UserID, req.ClientID)
+			if req.TokenEndpoint == "" {
+				req.TokenEndpoint = te
+			}
+			if req.IssuerURL == "" {
+				req.IssuerURL = iss
+			}
+			if req.Scopes == "" {
+				req.Scopes = sc
+			}
+		}
 		if req.ClientID == "" || req.TokenEndpoint == "" {
 			w.WriteHeader(400)
-			json.NewEncoder(w).Encode(map[string]string{"error": "external_idp requires clientId and tokenEndpoint"})
+			json.NewEncoder(w).Encode(map[string]string{"error": "external_idp requires clientId and tokenEndpoint (or userId to derive it)"})
 			return
 		}
 		if err := auth.ValidateExternalIdpEndpoint(req.TokenEndpoint); err != nil {

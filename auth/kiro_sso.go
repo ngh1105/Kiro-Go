@@ -548,6 +548,43 @@ func ValidateExternalIdpEndpoint(rawURL string) error {
 	return externalIdpEndpointValidator(rawURL)
 }
 
+// DeriveExternalIdpEndpoints reconstructs the Microsoft / Azure AD token endpoint,
+// OIDC issuer, and default scopes from a Kiro account's userId (which embeds the
+// Azure tenant) and the (constant) Kiro client ID. This lets the credential-import
+// path accept Kiro Account Manager exports, whose credentials block carries
+// refreshToken + clientId but NOT tokenEndpoint/issuerUrl/scopes.
+//
+// userId looks like: https://login.microsoftonline.com/<tenant>/v2.0.<oid>
+// Returns empty strings if userId is empty/unparseable, so the caller can fall
+// back to its "requires clientId and tokenEndpoint" error. The derived
+// tokenEndpoint is re-validated against the IdP allow-list by the caller, so a
+// non-allow-listed host (or the test's http+127.0.0.1 fake) is still gated.
+func DeriveExternalIdpEndpoints(userId, clientID string) (tokenEndpoint, issuerURL, scopes string) {
+	raw := strings.TrimSpace(userId)
+	if raw == "" {
+		return "", "", ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "", "", ""
+	}
+	segments := strings.Split(strings.Trim(u.Path, "/"), "/")
+	if len(segments) == 0 || segments[0] == "" {
+		return "", "", ""
+	}
+	tenant := segments[0]
+	scheme := u.Scheme
+	if scheme == "" {
+		scheme = "https"
+	}
+	tokenEndpoint = fmt.Sprintf("%s://%s/%s/oauth2/v2.0/token", scheme, u.Host, tenant)
+	issuerURL = fmt.Sprintf("%s://%s/%s/v2.0", scheme, u.Host, tenant)
+	if clientID != "" {
+		scopes = fmt.Sprintf("api://%s/codewhisperer:conversations api://%s/codewhisperer:completions offline_access", clientID, clientID)
+	}
+	return tokenEndpoint, issuerURL, scopes
+}
+
 // oidcDiscover fetches the OpenID Connect discovery document for issuerURL and
 // returns its authorization and token endpoints. The issuer and BOTH discovered
 // endpoints are validated against the IdP host allow-list; redirects are NOT
