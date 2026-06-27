@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"crypto/sha256"
 	"strings"
 	"testing"
 	"time"
@@ -260,5 +261,48 @@ func TestPromptCacheImplicitBreakpointAtMessageEnd(t *testing.T) {
 	result := tracker.Compute("acct-1", profile2)
 	if result.CacheReadInputTokens == 0 {
 		t.Fatalf("expected cache read via implicit message-end breakpoint, got %+v", result)
+	}
+}
+
+// TestPromptCacheCrossAccountSharing verifies C1: two different accountIDs with
+// the SAME prompt fingerprint share cache entries. Account B's request should
+// HIT on the fingerprint Account A stored — no per-account isolation.
+func TestPromptCacheCrossAccountSharing(t *testing.T) {
+	tracker := newPromptCacheTracker(5 * time.Minute)
+
+	// Build a profile with one explicit cache_control breakpoint above the
+	// min-token threshold.
+	block := cacheablePromptBlock{
+		Value: map[string]interface{}{"kind": "system", "block": map[string]interface{}{
+			"type": "text", "text": strings.Repeat("x ", 600), // ~600 tokens > 1024? use more
+			"cache_control": map[string]interface{}{"type": "ephemeral"},
+		}},
+		Tokens: 1200,
+		TTL:    5 * time.Minute,
+	}
+	hasher := sha256.New()
+	writeHashChunk(hasher, canonicalizeCacheValue(block.Value))
+	var fp [32]byte
+	copy(fp[:], hasher.Sum(nil))
+
+	profile := &promptCacheProfile{
+		Breakpoints:      []promptCacheBreakpoint{{Fingerprint: fp, CumulativeTokens: 1200, TTL: 5 * time.Minute}},
+		TotalInputTokens: 1200,
+		Model:            "claude-sonnet-4-5",
+	}
+
+	// Account A: first request → cache_creation.
+	usageA := tracker.Compute("account-A", profile)
+	if usageA.CacheCreationInputTokens == 0 {
+		t.Fatalf("account A: expected cache_creation > 0, got %d", usageA.CacheCreationInputTokens)
+	}
+	tracker.Update("account-A", profile)
+
+	// Account B: SAME prompt, DIFFERENT account → should be cache_read (C1 fix).
+	// Before C1: account B had its own empty store → cache_creation.
+	// After C1:  account B shares the global store → cache_read.
+	usageB := tracker.Compute("account-B", profile)
+	if usageB.CacheReadInputTokens == 0 {
+		t.Fatalf("account B: expected cache_read > 0 (cross-account sharing), got 0. usage=%+v", usageB)
 	}
 }
