@@ -348,6 +348,37 @@ func TestAutoRecoverReprobesDisabledAccount(t *testing.T) {
 	}
 }
 
+// TestCircuitBreakerOpensAfterConsecutiveErrors verifies that 5 consecutive
+// errors open the circuit, and the account is skipped during the open window.
+func TestCircuitBreakerOpensAfterConsecutiveErrors(t *testing.T) {
+	cfgFile := t.TempDir() + "/config.json"
+	if err := config.Init(cfgFile); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	config.AddAccount(config.Account{ID: "a", Enabled: true, AuthMethod: "social", Region: "us-east-1"})
+	config.AddAccount(config.Account{ID: "b", Enabled: true, AuthMethod: "social", Region: "us-east-1"})
+
+	p := &AccountPool{
+		cooldowns:    make(map[string]time.Time),
+		errorCounts:  make(map[string]int),
+		modelLists:   make(map[string]map[string]bool),
+		circuitState: make(map[string]*circuitBreaker),
+	}
+	p.Reload()
+
+	// 5 errors on account "a" → circuit opens.
+	for i := 0; i < 5; i++ {
+		p.RecordError("a", false)
+	}
+
+	if !p.isCircuitOpen("a", time.Now()) {
+		t.Fatalf("expected circuit OPEN for 'a' after 5 errors")
+	}
+	if p.isCircuitOpen("b", time.Now()) {
+		t.Fatalf("circuit for 'b' should be CLOSED")
+	}
+}
+
 func TestReloadDropsOverQuotaAccountWhenAllowOverUsageDisabled(t *testing.T) {
 	cfgFile := filepath.Join(t.TempDir(), "config.json")
 	if err := config.Init(cfgFile); err != nil {

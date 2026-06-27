@@ -13,6 +13,66 @@ import (
 
 const tokenRefreshSkewSeconds int64 = 120
 
+const (
+	circuitClosed          = 0
+	circuitOpen            = 1
+	circuitHalfOpen        = 2
+	circuitErrorThreshold  = 5
+	circuitOpenDuration    = 30 * time.Second
+)
+
+type circuitBreaker struct {
+	state          int
+	consecutiveErr int
+	openedAt       time.Time
+}
+
+// isCircuitOpen reports whether an account's circuit breaker is currently open
+// (and should be skipped). It also transitions open→half-open after the open
+// duration elapses, allowing a single probe request through.
+func (p *AccountPool) isCircuitOpen(id string, now time.Time) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	cb, ok := p.circuitState[id]
+	if !ok || cb == nil {
+		return false
+	}
+	switch cb.state {
+	case circuitOpen:
+		if now.Sub(cb.openedAt) >= circuitOpenDuration {
+			cb.state = circuitHalfOpen // transition to half-open after timeout
+			return false               // allow one probe
+		}
+		return true
+	case circuitHalfOpen:
+		return false // allow the probe through
+	default:
+		return false
+	}
+}
+
+// isCircuitOpenLocked is a lock-free variant for use while the caller already
+// holds p.mu (e.g. inside GetNextForModelExcluding, which holds the RLock).
+// Calling p.mu.Lock() from inside a held RLock deadlocks, so selection paths
+// use this read-only check instead. The open→half-open transition happens via
+// isCircuitOpen (external callers); here we simply allow a probe through once
+// the open duration has elapsed.
+func (p *AccountPool) isCircuitOpenLocked(id string, now time.Time) bool {
+	cb, ok := p.circuitState[id]
+	if !ok || cb == nil {
+		return false
+	}
+	switch cb.state {
+	case circuitOpen:
+		if now.Sub(cb.openedAt) >= circuitOpenDuration {
+			return false // half-open transition
+		}
+		return true
+	default:
+		return false
+	}
+}
+
 // AccountPool 账号池
 type AccountPool struct {
 	mu             sync.RWMutex
@@ -25,6 +85,7 @@ type AccountPool struct {
 	reprobeBackoff map[string]time.Duration   // accountID → next backoff interval
 	reprobeNext    map[string]time.Time       // accountID → when to next probe
 	stopRecover    chan struct{}
+	circuitState   map[string]*circuitBreaker // accountID → circuit breaker state
 }
 
 var (
@@ -41,6 +102,7 @@ func GetPool() *AccountPool {
 			modelLists:     make(map[string]map[string]bool),
 			reprobeBackoff: make(map[string]time.Duration),
 			reprobeNext:    make(map[string]time.Time),
+			circuitState:   make(map[string]*circuitBreaker),
 		}
 		pool.Reload()
 		if config.GetAutoRecoverEnabled() {
@@ -108,6 +170,12 @@ func (p *AccountPool) GetNextExcluding(excluded map[string]bool) *config.Account
 
 		// 跳过冷却中的账号
 		if cooldown, ok := p.cooldowns[acc.ID]; ok && now.Before(cooldown) {
+			seen[acc.ID] = true
+			continue
+		}
+
+		// Skip accounts with an open circuit breaker.
+		if p.isCircuitOpenLocked(acc.ID, now) {
 			seen[acc.ID] = true
 			continue
 		}
@@ -227,6 +295,12 @@ func (p *AccountPool) GetNextForModelExcluding(model string, excluded map[string
 			seen[acc.ID] = true
 			continue
 		}
+
+		// Skip accounts with an open circuit breaker.
+		if p.isCircuitOpenLocked(acc.ID, now) {
+			seen[acc.ID] = true
+			continue
+		}
 		if acc.ExpiresAt > 0 && time.Now().Unix() > acc.ExpiresAt-tokenRefreshSkewSeconds {
 			seen[acc.ID] = true
 			continue
@@ -282,6 +356,11 @@ func (p *AccountPool) RecordSuccess(id string) {
 	defer p.mu.Unlock()
 	delete(p.cooldowns, id)
 	p.errorCounts[id] = 0
+	// Circuit breaker: reset on success.
+	if cb, ok := p.circuitState[id]; ok && cb != nil {
+		cb.state = circuitClosed
+		cb.consecutiveErr = 0
+	}
 }
 
 // RecordError 记录请求错误，设置冷却
@@ -297,6 +376,22 @@ func (p *AccountPool) RecordError(id string, isQuotaError bool) {
 	} else if p.errorCounts[id] >= 3 {
 		// 连续 3 次错误，冷却 1 分钟
 		p.cooldowns[id] = time.Now().Add(time.Minute)
+	}
+
+	// Circuit breaker: track consecutive errors.
+	cb := p.circuitState[id]
+	if cb == nil {
+		cb = &circuitBreaker{state: circuitClosed}
+		p.circuitState[id] = cb
+	}
+	cb.consecutiveErr++
+	if cb.state == circuitHalfOpen {
+		// Probe failed → re-open.
+		cb.state = circuitOpen
+		cb.openedAt = time.Now()
+	} else if cb.consecutiveErr >= circuitErrorThreshold && cb.state == circuitClosed {
+		cb.state = circuitOpen
+		cb.openedAt = time.Now()
 	}
 }
 
