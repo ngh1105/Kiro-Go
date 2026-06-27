@@ -53,9 +53,9 @@ type promptCacheEntry struct {
 }
 
 type promptCacheTracker struct {
-	mu               sync.Mutex
-	entriesByAccount map[string]map[[32]byte]promptCacheEntry
-	maxSupportedTTL  time.Duration
+	mu              sync.Mutex
+	entries         map[[32]byte]promptCacheEntry
+	maxSupportedTTL time.Duration
 }
 
 func newPromptCacheTracker(maxTTL time.Duration) *promptCacheTracker {
@@ -63,8 +63,8 @@ func newPromptCacheTracker(maxTTL time.Duration) *promptCacheTracker {
 		maxTTL = defaultPromptCacheTTL
 	}
 	return &promptCacheTracker{
-		entriesByAccount: make(map[string]map[[32]byte]promptCacheEntry),
-		maxSupportedTTL:  maxTTL,
+		entries:         make(map[[32]byte]promptCacheEntry),
+		maxSupportedTTL: maxTTL,
 	}
 }
 
@@ -139,8 +139,7 @@ func (t *promptCacheTracker) Compute(accountID string, profile *promptCacheProfi
 	defer t.mu.Unlock()
 	t.pruneExpiredLocked(now)
 
-	entries := t.entriesByAccount[accountID]
-	if len(entries) == 0 {
+	if len(t.entries) == 0 {
 		// First request for this account: report creation only if above threshold.
 		effectiveCreation := lastTokens
 		if effectiveCreation < minTokens {
@@ -170,12 +169,12 @@ func (t *promptCacheTracker) Compute(accountID string, profile *promptCacheProfi
 		if breakpoint.CumulativeTokens < minTokens {
 			continue
 		}
-		entry, ok := entries[breakpoint.Fingerprint]
+		entry, ok := t.entries[breakpoint.Fingerprint]
 		if !ok || entry.ExpiresAt.Before(now) {
 			continue
 		}
 		entry.ExpiresAt = now.Add(entry.TTL)
-		entries[breakpoint.Fingerprint] = entry
+		t.entries[breakpoint.Fingerprint] = entry
 		matchedTokens = minInt(breakpoint.CumulativeTokens, profile.TotalInputTokens)
 		if matchedTokens > lastTokens {
 			matchedTokens = lastTokens
@@ -204,18 +203,13 @@ func (t *promptCacheTracker) Update(accountID string, profile *promptCacheProfil
 	defer t.mu.Unlock()
 	t.pruneExpiredLocked(now)
 
-	entries := t.entriesByAccount[accountID]
-	if entries == nil {
-		entries = make(map[[32]byte]promptCacheEntry)
-		t.entriesByAccount[accountID] = entries
-	}
-
+	// entries is the global map now (C1: cross-account sharing).
 	for _, breakpoint := range profile.Breakpoints {
 		// Skip breakpoints below the minimum cacheable token threshold.
 		if breakpoint.CumulativeTokens < minTokens {
 			continue
 		}
-		entries[breakpoint.Fingerprint] = promptCacheEntry{
+		t.entries[breakpoint.Fingerprint] = promptCacheEntry{
 			ExpiresAt: now.Add(breakpoint.TTL),
 			TTL:       breakpoint.TTL,
 		}
@@ -223,14 +217,9 @@ func (t *promptCacheTracker) Update(accountID string, profile *promptCacheProfil
 }
 
 func (t *promptCacheTracker) pruneExpiredLocked(now time.Time) {
-	for accountID, entries := range t.entriesByAccount {
-		for fingerprint, entry := range entries {
-			if !entry.ExpiresAt.After(now) {
-				delete(entries, fingerprint)
-			}
-		}
-		if len(entries) == 0 {
-			delete(t.entriesByAccount, accountID)
+	for fingerprint, entry := range t.entries {
+		if !entry.ExpiresAt.After(now) {
+			delete(t.entries, fingerprint)
 		}
 	}
 }
