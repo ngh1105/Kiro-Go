@@ -243,10 +243,9 @@ func TestGetNextExcludingSkipsExcludedAccount(t *testing.T) {
 			{ID: "a", Enabled: true},
 			{ID: "b", Enabled: true},
 		},
-		cooldowns:    make(map[string]time.Time),
-		errorCounts:  make(map[string]int),
-		modelLists:   make(map[string]map[string]bool),
-		currentIndex: ^uint64(0),
+		cooldowns:   make(map[string]time.Time),
+		errorCounts: make(map[string]int),
+		modelLists:  make(map[string]map[string]bool),
 	}
 
 	acc := p.GetNextExcluding(map[string]bool{"a": true})
@@ -261,10 +260,9 @@ func TestGetNextForModelExcludingSkipsExcludedAccount(t *testing.T) {
 			{ID: "a", Enabled: true},
 			{ID: "b", Enabled: true},
 		},
-		cooldowns:    make(map[string]time.Time),
-		errorCounts:  make(map[string]int),
-		modelLists:   make(map[string]map[string]bool),
-		currentIndex: ^uint64(0),
+		cooldowns:   make(map[string]time.Time),
+		errorCounts: make(map[string]int),
+		modelLists:  make(map[string]map[string]bool),
 	}
 	p.SetModelList("a", []string{"claude-sonnet-4.5"})
 	p.SetModelList("b", []string{"claude-sonnet-4.5"})
@@ -379,42 +377,81 @@ func TestCircuitBreakerOpensAfterConsecutiveErrors(t *testing.T) {
 	}
 }
 
-// TestHealthAwareScoringPrefersHealthyAccount verifies that a healthy account
-// (0 errors, low latency) is selected more often than a failing one.
-func TestHealthAwareScoringPrefersHealthyAccount(t *testing.T) {
+// TestLRUSelectionBalancesAcrossEqualAccounts verifies dispatch interleaves
+// requests evenly across healthy accounts (least-recently-used), instead of
+// concentrating load via score-weighted random. Over several full rotations
+// each account must receive an equal share.
+func TestLRUSelectionBalancesAcrossEqualAccounts(t *testing.T) {
 	cfgFile := t.TempDir() + "/config.json"
 	if err := config.Init(cfgFile); err != nil {
 		t.Fatalf("config.Init: %v", err)
 	}
-	config.AddAccount(config.Account{ID: "healthy", Enabled: true, AuthMethod: "social", Region: "us-east-1"})
-	config.AddAccount(config.Account{ID: "failing", Enabled: true, AuthMethod: "social", Region: "us-east-1"})
+	config.AddAccount(config.Account{ID: "a", Enabled: true, AuthMethod: "social", Region: "us-east-1"})
+	config.AddAccount(config.Account{ID: "b", Enabled: true, AuthMethod: "social", Region: "us-east-1"})
+	config.AddAccount(config.Account{ID: "c", Enabled: true, AuthMethod: "social", Region: "us-east-1"})
 
 	p := &AccountPool{
-		cooldowns:    make(map[string]time.Time),
-		errorCounts:  make(map[string]int),
-		modelLists:   make(map[string]map[string]bool),
-		circuitState: make(map[string]*circuitBreaker),
-		healthStats:  make(map[string]*accountHealth),
+		cooldowns:       make(map[string]time.Time),
+		errorCounts:     make(map[string]int),
+		modelLists:      make(map[string]map[string]bool),
+		circuitState:    make(map[string]*circuitBreaker),
+		healthStats:     make(map[string]*accountHealth),
+		lastDispatchSeq: make(map[string]uint64),
 	}
 	p.Reload()
 
-	// Make "failing" look unhealthy: record errors + high latency.
-	for i := 0; i < 4; i++ {
-		p.RecordError("failing", false)
-	}
-	p.RecordLatency("failing", 5000) // 5s latency
-	p.RecordLatency("healthy", 100)  // 100ms latency
-
-	// Sample 100 selections — healthy should win the majority.
-	healthyCount := 0
-	for i := 0; i < 100; i++ {
+	counts := map[string]int{}
+	for i := 0; i < 300; i++ {
 		acc := p.GetNextForModelExcluding("model", nil)
-		if acc != nil && acc.ID == "healthy" {
-			healthyCount++
+		if acc == nil {
+			t.Fatalf("expected an account, got nil at pick %d", i)
+		}
+		counts[acc.ID]++
+	}
+	// 300 picks / 3 accounts = 100 each (LRU rotates strictly after warm-up).
+	for _, id := range []string{"a", "b", "c"} {
+		if counts[id] < 90 || counts[id] > 110 {
+			t.Fatalf("account %s picked %d times, expected ~100 (balanced)", id, counts[id])
 		}
 	}
-	if healthyCount < 60 {
-		t.Fatalf("expected healthy account selected >60%% of the time, got %d%%", healthyCount)
+}
+
+// TestLRUDoesNotStarveSlowAccount verifies a slow-but-healthy account is not
+// starved. Under the old score-weighted random selection a high-latency
+// account's tiny score routed almost no traffic to it; LRU gives it its fair
+// interleaved share (the circuit breaker, not latency, removes failing accounts).
+func TestLRUDoesNotStarveSlowAccount(t *testing.T) {
+	cfgFile := t.TempDir() + "/config.json"
+	if err := config.Init(cfgFile); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	config.AddAccount(config.Account{ID: "fast", Enabled: true, AuthMethod: "social", Region: "us-east-1"})
+	config.AddAccount(config.Account{ID: "slow", Enabled: true, AuthMethod: "social", Region: "us-east-1"})
+
+	p := &AccountPool{
+		cooldowns:       make(map[string]time.Time),
+		errorCounts:     make(map[string]int),
+		modelLists:      make(map[string]map[string]bool),
+		circuitState:    make(map[string]*circuitBreaker),
+		healthStats:     make(map[string]*accountHealth),
+		lastDispatchSeq: make(map[string]uint64),
+	}
+	p.Reload()
+
+	// Make "slow" score far below "fast" via a huge latency observation.
+	p.RecordLatency("slow", 60000) // 60s latency → score ≈ 0.016
+	p.RecordLatency("fast", 10)    // 10ms latency → score ≈ 0.99
+
+	slow := 0
+	for i := 0; i < 100; i++ {
+		acc := p.GetNextForModelExcluding("model", nil)
+		if acc != nil && acc.ID == "slow" {
+			slow++
+		}
+	}
+	// Old weighted-random: ~2%. LRU: ~50%. Demand a fair share.
+	if slow < 30 {
+		t.Fatalf("slow account starved: picked %d/100, expected >=30 (LRU fair share)", slow)
 	}
 }
 

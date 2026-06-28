@@ -111,19 +111,20 @@ func (p *AccountPool) isCircuitOpen(id string, now time.Time) bool {
 
 // AccountPool 账号池
 type AccountPool struct {
-	mu             sync.RWMutex
-	accounts       []config.Account
-	totalAccounts  int
-	currentIndex   uint64
-	cooldowns      map[string]time.Time       // 账号冷却时间
-	errorCounts    map[string]int             // 连续错误计数
-	modelLists     map[string]map[string]bool // accountID → set of modelIDs (from ListAvailableModels)
-	reprobeBackoff map[string]time.Duration   // accountID → next backoff interval
-	reprobeNext    map[string]time.Time       // accountID → when to next probe
-	stopRecover    chan struct{}
-	circuitState   map[string]*circuitBreaker // accountID → circuit breaker state
-	healthStats    map[string]*accountHealth  // accountID → EWMA latency + error/success counts
-	apiKeyAffinity map[string]apiKeyBinding   // apiKeyID → preferred account (sticky routing)
+	mu              sync.RWMutex
+	accounts        []config.Account
+	totalAccounts   int
+	lastDispatchSeq map[string]uint64          // accountID → last dispatch sequence (lower = used longer ago; LRU clock)
+	dispatchSeq     uint64                     // monotonically increases per dispatch (stable LRU ordering)
+	cooldowns       map[string]time.Time       // 账号冷却时间
+	errorCounts     map[string]int             // 连续错误计数
+	modelLists      map[string]map[string]bool // accountID → set of modelIDs (from ListAvailableModels)
+	reprobeBackoff  map[string]time.Duration   // accountID → next backoff interval
+	reprobeNext     map[string]time.Time       // accountID → when to next probe
+	stopRecover     chan struct{}
+	circuitState    map[string]*circuitBreaker // accountID → circuit breaker state
+	healthStats     map[string]*accountHealth  // accountID → EWMA latency + error/success counts
+	apiKeyAffinity  map[string]apiKeyBinding   // apiKeyID → preferred account (sticky routing)
 }
 
 var (
@@ -135,14 +136,15 @@ var (
 func GetPool() *AccountPool {
 	poolOnce.Do(func() {
 		pool = &AccountPool{
-			cooldowns:      make(map[string]time.Time),
-			errorCounts:    make(map[string]int),
-			modelLists:     make(map[string]map[string]bool),
-			reprobeBackoff: make(map[string]time.Duration),
-			reprobeNext:    make(map[string]time.Time),
-			circuitState:   make(map[string]*circuitBreaker),
-			healthStats:    make(map[string]*accountHealth),
-			apiKeyAffinity: make(map[string]apiKeyBinding),
+			cooldowns:       make(map[string]time.Time),
+			lastDispatchSeq: make(map[string]uint64),
+			errorCounts:     make(map[string]int),
+			modelLists:      make(map[string]map[string]bool),
+			reprobeBackoff:  make(map[string]time.Duration),
+			reprobeNext:     make(map[string]time.Time),
+			circuitState:    make(map[string]*circuitBreaker),
+			healthStats:     make(map[string]*accountHealth),
+			apiKeyAffinity:  make(map[string]apiKeyBinding),
 		}
 		pool.Reload()
 		if config.GetAutoRecoverEnabled() {
@@ -178,7 +180,7 @@ func (p *AccountPool) GetNext() *config.Account {
 	return p.GetNextExcluding(nil)
 }
 
-// GetNextExcluding 获取下一个可用账号（健康加权随机），并跳过指定账号。
+// GetNextExcluding 获取下一个可用账号（LRU 轮询，最少最近使用），并跳过指定账号。
 // Delegates to GetNextForModelExcluding with model="" (any model).
 func (p *AccountPool) GetNextExcluding(excluded map[string]bool) *config.Account {
 	return p.GetNextForModelExcluding("", excluded)
@@ -229,12 +231,17 @@ func (p *AccountPool) GetNextForModel(model string) *config.Account {
 }
 
 // GetNextForModelExcluding selects an account supporting the model using
-// health-aware, score-weighted random selection (weight = probability, not
-// slot count). Skips excluded, cooled-down, circuit-open, token-expiring, and
-// quota-blocked accounts. model="" means "any model".
+// least-recently-used (LRU) selection: the eligible account dispatched longest
+// ago is chosen first, which interleaves requests evenly across healthy
+// accounts (replacing score-weighted random, whose EWMA-driven skew
+// concentrated load on a few "lucky" accounts and starved the rest). Health
+// score acts as a tie-breaker when several accounts share the lowest dispatch
+// sequence (cold start with several never-dispatched accounts). Skips
+// excluded, cooled-down, circuit-open, token-expiring, and quota-blocked
+// accounts. model="" means "any model".
 func (p *AccountPool) GetNextForModelExcluding(model string, excluded map[string]bool) *config.Account {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
+	p.mu.Lock()
+	defer p.mu.Unlock()
 
 	if len(p.accounts) == 0 {
 		return nil
@@ -243,13 +250,14 @@ func (p *AccountPool) GetNextForModelExcluding(model string, excluded map[string
 	allowOverUsage := config.GetAllowOverUsage()
 	now := time.Now()
 
-	// Build candidate list with health scores.
+	// Build candidate list: each eligible account paired with its last
+	// dispatch sequence (LRU key) and health score (tie-breaker).
 	type candidate struct {
-		acc   *config.Account
-		score float64
+		acc     *config.Account
+		lastSeq uint64
+		score   float64
 	}
 	var candidates []candidate
-	totalScore := 0.0
 	for i := range p.accounts {
 		acc := &p.accounts[i]
 		if excluded != nil && excluded[acc.ID] {
@@ -270,12 +278,11 @@ func (p *AccountPool) GetNextForModelExcluding(model string, excluded map[string
 		if isQuotaBlocked(*acc, allowOverUsage) {
 			continue
 		}
-		score := p.healthScore(acc.ID, effectiveWeight(acc.Weight))
-		if score <= 0 {
-			score = 0.01 // tiny non-zero so a degraded account is still selectable as fallback
-		}
-		candidates = append(candidates, candidate{acc, score})
-		totalScore += score
+		candidates = append(candidates, candidate{
+			acc:     acc,
+			lastSeq: p.lastDispatchSeq[acc.ID],
+			score:   p.healthScore(acc.ID, effectiveWeight(acc.Weight)),
+		})
 	}
 
 	if len(candidates) == 0 {
@@ -283,16 +290,42 @@ func (p *AccountPool) GetNextForModelExcluding(model string, excluded map[string
 		return p.fallbackEarliestCooldown(model, excluded, allowOverUsage)
 	}
 
-	// Score-weighted random selection.
-	r := rand.Float64() * totalScore
-	cumulative := 0.0
-	for _, c := range candidates {
-		cumulative += c.score
-		if r <= cumulative {
-			return c.acc
+	// Least-recently-used: pick the candidate dispatched longest ago (lowest
+	// sequence; never-dispatched accounts share the zero value). Ties are broken
+	// by health score (higher preferred), then at random so a cold pool spreads
+	// its first picks instead of always hitting the first account. A monotonic
+	// sequence counter (not wall-clock) keys the ordering, so two accounts can
+	// never share a key — LRU stays exact round-robin regardless of clock
+	// resolution.
+	oldest := candidates[0].lastSeq
+	for _, c := range candidates[1:] {
+		if c.lastSeq < oldest {
+			oldest = c.lastSeq
 		}
 	}
-	return candidates[len(candidates)-1].acc
+	var top []candidate
+	topScore := -1.0
+	for _, c := range candidates {
+		if c.lastSeq != oldest {
+			continue
+		}
+		if len(top) == 0 || c.score > topScore {
+			top = []candidate{c}
+			topScore = c.score
+		} else if c.score == topScore {
+			top = append(top, c)
+		}
+	}
+	chosen := top[rand.Intn(len(top))].acc
+
+	// Advance the monotonic LRU clock and stamp the chosen account so the next
+	// pick goes to a different one.
+	p.dispatchSeq++
+	if p.lastDispatchSeq == nil {
+		p.lastDispatchSeq = make(map[string]uint64)
+	}
+	p.lastDispatchSeq[chosen.ID] = p.dispatchSeq
+	return chosen
 }
 
 // GetByID 根据 ID 获取账号
@@ -326,8 +359,14 @@ func (p *AccountPool) GetNextForModelWithApiKey(model string, excluded map[strin
 				p.mu.RUnlock()
 				cooldownActive := hasCooldown && time.Now().Before(cooldown)
 				if !isExcluded && !cooldownActive && !p.isCircuitOpen(acc.ID, time.Now()) {
+					now := time.Now()
 					p.mu.Lock()
-					binding.lastUsed = time.Now()
+					binding.lastUsed = now
+					p.dispatchSeq++
+					if p.lastDispatchSeq == nil {
+						p.lastDispatchSeq = make(map[string]uint64)
+					}
+					p.lastDispatchSeq[acc.ID] = p.dispatchSeq
 					p.apiKeyAffinity[apiKey] = binding
 					p.mu.Unlock()
 					return acc
@@ -658,9 +697,9 @@ func (p *AccountPool) RecordLatency(id string, latencyMs float64) {
 	}
 }
 
-// healthScore returns a selection weight for the account: higher = preferred.
+// healthScore returns a tie-breaker weight for the account: higher = preferred.
 // score = effectiveWeight × (1 - ewmaErrorRate) × (1 / (1 + latency/1000))
-// Lock-free: the caller (GetNextForModelExcluding) already holds p.mu RLock.
+// Used only to break ties in LRU selection. Lock-free: the caller holds p.mu.
 func (p *AccountPool) healthScore(id string, weight int) float64 {
 	w := float64(weight)
 	if w < 1 {
