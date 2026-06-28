@@ -427,6 +427,20 @@ func GetAccounts() []Account {
 	return accounts
 }
 
+// GetAccountByID returns a copy of the account with the given ID, or ok=false
+// if no such account exists. Used by auth.RefreshToken's double-checked
+// locking to read the canonical token state.
+func GetAccountByID(id string) (Account, bool) {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	for i := range cfg.Accounts {
+		if cfg.Accounts[i].ID == id {
+			return cfg.Accounts[i], true
+		}
+	}
+	return Account{}, false
+}
+
 // AccountIDExists reports whether an account with the given ID is already stored.
 // Used by the credential-import path to reuse a pasted record's id when it does
 // not collide, so re-importing a backup never creates a duplicate entry.
