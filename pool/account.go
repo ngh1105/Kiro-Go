@@ -295,8 +295,19 @@ func (p *AccountPool) GetNextForModelExcluding(model string, excluded map[string
 	}
 
 	if len(candidates) == 0 {
-		// Fallback: return the account with the earliest cooldown.
-		return p.fallbackEarliestCooldown(model, excluded, allowOverUsage)
+		// Fallback: return the account with the earliest cooldown. Stamp the
+		// LRU clock so a later healthy pick doesn't immediately re-select this
+		// account (every other dispatch path stamps; the fallback must too, or
+		// a degraded account's stale seq wins the next pick and gets a burst).
+		acc := p.fallbackEarliestCooldown(model, excluded, allowOverUsage)
+		if acc != nil {
+			p.dispatchSeq++
+			if p.lastDispatchSeq == nil {
+				p.lastDispatchSeq = make(map[string]uint64)
+			}
+			p.lastDispatchSeq[acc.ID] = p.dispatchSeq
+		}
+		return acc
 	}
 
 	// Least-recently-used: pick the candidate dispatched longest ago (lowest

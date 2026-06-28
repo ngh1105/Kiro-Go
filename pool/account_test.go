@@ -455,6 +455,44 @@ func TestLRUDoesNotStarveSlowAccount(t *testing.T) {
 	}
 }
 
+// TestFallbackDispatchStampsLRUSeq verifies the fallback dispatch path also
+// advances the LRU clock. The final whole-branch review found this was the one
+// return path that did not stamp lastDispatchSeq, so a fallback account kept a
+// stale (low) sequence and got a burst the moment its cooldown expired.
+func TestFallbackDispatchStampsLRUSeq(t *testing.T) {
+	cfgFile := t.TempDir() + "/config.json"
+	if err := config.Init(cfgFile); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	if err := config.AddAccount(config.Account{ID: "a", Enabled: true, AuthMethod: "social", Region: "us-east-1"}); err != nil {
+		t.Fatalf("AddAccount: %v", err)
+	}
+
+	p := &AccountPool{
+		cooldowns:       make(map[string]time.Time),
+		errorCounts:     make(map[string]int),
+		modelLists:      make(map[string]map[string]bool),
+		lastDispatchSeq: make(map[string]uint64),
+	}
+	p.Reload()
+
+	// Force the fallback path: an active cooldown excludes "a" from the normal
+	// candidate list, but fallbackEarliestCooldown still returns it.
+	p.cooldowns["a"] = time.Now().Add(time.Hour)
+
+	seqBefore := p.dispatchSeq
+	acc := p.GetNextForModelExcluding("model", nil)
+	if acc == nil || acc.ID != "a" {
+		t.Fatalf("expected fallback to return account 'a', got %#v", acc)
+	}
+	if p.dispatchSeq != seqBefore+1 {
+		t.Fatalf("fallback did not advance dispatchSeq: %d -> %d", seqBefore, p.dispatchSeq)
+	}
+	if p.lastDispatchSeq["a"] != p.dispatchSeq {
+		t.Fatalf("fallback did not stamp lastDispatchSeq for 'a': got %d, want %d", p.lastDispatchSeq["a"], p.dispatchSeq)
+	}
+}
+
 // TestSessionAffinityBindsApiKeyToAccount verifies that 2 consecutive requests
 // from the same API key route to the same account.
 func TestSessionAffinityBindsApiKeyToAccount(t *testing.T) {
