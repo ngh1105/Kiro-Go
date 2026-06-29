@@ -83,3 +83,35 @@ func TestSplitAgainstTotalNoCoverageIsAllInput(t *testing.T) {
 		t.Fatalf("expected all 2000 billed as input, got %d", billed)
 	}
 }
+
+// TestStopIsIdempotent verifies Stop() can be called twice (e.g. test cleanup
+// + main shutdown) without panicking on a double close of stopChan.
+func TestStopIsIdempotent(t *testing.T) {
+	tr := newPromptCacheTracker(time.Hour)
+	tr.stopChan = make(chan struct{})
+	tr.Stop()
+	tr.Stop() // before fix: close of closed channel → panic
+}
+
+// TestComputeSetsDirtyOnCacheHit verifies a cache hit marks the tracker dirty
+// so the extended TTL/LastHit is persisted even if the save loop flushes
+// between Compute and the following Update.
+func TestComputeSetsDirtyOnCacheHit(t *testing.T) {
+	tr := newPromptCacheTracker(time.Hour)
+	profile := &promptCacheProfile{
+		Model:            "claude-sonnet-4-6",
+		TotalInputTokens: 10000,
+		Breakpoints: []promptCacheBreakpoint{
+			{Fingerprint: [32]byte{1}, CumulativeTokens: 2000, TTL: time.Hour},
+		},
+	}
+	now := time.Now()
+	tr.entries[[32]byte{1}] = promptCacheEntry{ExpiresAt: now.Add(time.Hour), TTL: time.Hour, LastHit: now}
+	tr.dirty = false
+
+	tr.Compute("acct", profile)
+
+	if !tr.dirty {
+		t.Fatal("Compute must set dirty on a cache hit so the refreshed TTL/LastHit is persisted")
+	}
+}

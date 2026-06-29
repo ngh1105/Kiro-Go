@@ -65,6 +65,7 @@ type promptCacheTracker struct {
 	maxSupportedTTL time.Duration
 	dirty           bool
 	stopChan        chan struct{}
+	stopOnce        sync.Once
 }
 
 func newPromptCacheTracker(maxTTL time.Duration) *promptCacheTracker {
@@ -136,9 +137,13 @@ func (t *promptCacheTracker) startSaveLoop(path string, flushInterval time.Durat
 }
 
 func (t *promptCacheTracker) Stop() {
-	if t.stopChan != nil {
-		close(t.stopChan)
-	}
+	// Idempotent: a second Stop (e.g. test cleanup + main shutdown) would
+	// otherwise close an already-closed channel and panic.
+	t.stopOnce.Do(func() {
+		if t.stopChan != nil {
+			close(t.stopChan)
+		}
+	})
 }
 
 func (t *promptCacheTracker) flush(path string) {
@@ -278,6 +283,7 @@ func (t *promptCacheTracker) Compute(accountID string, profile *promptCacheProfi
 		entry.ExpiresAt = now.Add(entry.TTL)
 		entry.LastHit = now
 		t.entries[breakpoint.Fingerprint] = entry
+		t.dirty = true // hit extends TTL/LastHit — persist so a flush before the next Update doesn't lose it
 		matchedTokens = minInt(breakpoint.CumulativeTokens, profile.TotalInputTokens)
 		if matchedTokens > lastTokens {
 			matchedTokens = lastTokens
