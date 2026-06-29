@@ -338,3 +338,25 @@ func TestRealSuspensionDisablesAccount(t *testing.T) {
 		t.Fatalf("suspension should ban the account; got enabled=%v banStatus=%q", got.Enabled, got.BanStatus)
 	}
 }
+
+// TestProfileUnavailableDoesNotBanAccount verifies a transient "no available
+// Kiro profile" error from GetUsageLimits does NOT permanently ban the account.
+// The background refresh path must mirror the request path's soft handling
+// (account_failover.go), or a good external_idp account is banned on a blip.
+func TestProfileUnavailableDoesNotBanAccount(t *testing.T) {
+	cfgFile := t.TempDir() + "/config.json"
+	if err := config.Init(cfgFile); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	if err := config.AddAccount(config.Account{ID: "acct", Enabled: true, Email: "a@b.c", Provider: "external_idp"}); err != nil {
+		t.Fatalf("AddAccount: %v", err)
+	}
+	acc, _ := config.GetAccountByID("acct")
+
+	_ = classifyAndBanOnUsageError(&acc, errors.New("no available Kiro profile"))
+
+	got, _ := config.GetAccountByID("acct")
+	if !got.Enabled || got.BanStatus != "" {
+		t.Fatalf("profile-unavailable should NOT ban the account; got enabled=%v banStatus=%q", got.Enabled, got.BanStatus)
+	}
+}

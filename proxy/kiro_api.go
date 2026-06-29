@@ -527,6 +527,13 @@ func setKiroHeaders(req *http.Request, account *config.Account) {
 // strings.Contains, which previously false-banned accounts when "401"/"403"
 // appeared inside request IDs or timestamps. Returns the caller-facing error.
 func classifyAndBanOnUsageError(account *config.Account, err error) error {
+	// Profile ARN resolution may fail transiently (provisioning lag, cross-region
+	// probe failure). The request path treats this as soft (account_failover.go);
+	// the background refresh path must too, or a good external_idp account is
+	// permanently banned on a transient blip.
+	if isProfileUnavailableErrorMessage(err.Error()) {
+		return fmt.Errorf("GetUsageLimits: %w", err)
+	}
 	switch {
 	case pool.IsSuspensionError(err):
 		logger.Warnf("[RefreshAccountInfo] Account %s is suspended: %v", account.Email, err)
