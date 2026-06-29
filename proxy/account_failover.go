@@ -3,6 +3,7 @@ package proxy
 import (
 	"kiro-go/config"
 	"kiro-go/logger"
+	"kiro-go/pool"
 	"strings"
 	"time"
 )
@@ -29,20 +30,6 @@ func isSuspensionErrorMessage(msg string) bool {
 func isProfileUnavailableErrorMessage(msg string) bool {
 	msg = strings.ToLower(msg)
 	return strings.Contains(msg, "no available kiro profile")
-}
-
-func isAuthErrorMessage(msg string) bool {
-	msg = strings.ToLower(msg)
-	return strings.Contains(msg, "http 401") ||
-		strings.Contains(msg, "http 403") ||
-		strings.Contains(msg, "unauthorized") ||
-		strings.Contains(msg, "forbidden") ||
-		strings.Contains(msg, "authentication failed") ||
-		strings.Contains(msg, "token invalid") ||
-		strings.Contains(msg, "token expired") ||
-		strings.Contains(msg, "invalid_grant") ||
-		strings.Contains(msg, "access token expired") ||
-		strings.Contains(msg, "refresh token expired")
 }
 
 func (h *Handler) disableAccount(account *config.Account, banStatus, banReason string) {
@@ -107,7 +94,7 @@ func (h *Handler) handleAccountFailure(account *config.Account, err error) {
 		// Treat as a soft failure: short cooldown so the next request rotates account,
 		// but never auto-disable — operators can still investigate via warn logs.
 		h.pool.RecordError(account.ID, false)
-	case isAuthErrorMessage(errMsg):
+	case pool.IsAuthFailure(err):
 		h.disableAccount(account, "BANNED", "Authentication failed - token invalid or expired")
 	default:
 		h.pool.RecordError(account.ID, false)

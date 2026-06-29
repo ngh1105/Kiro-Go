@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"kiro-go/auth"
@@ -1428,7 +1429,7 @@ func classifyError(msg string) string {
 		return "overage"
 	case isSuspensionErrorMessage(msg):
 		return "suspended"
-	case isAuthErrorMessage(msg):
+	case pool.IsAuthFailure(errors.New(msg)):
 		return "auth"
 	case isProfileUnavailableErrorMessage(msg):
 		return "profile"
