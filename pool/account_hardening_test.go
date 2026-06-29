@@ -101,3 +101,52 @@ func TestPruneExpiredAffinityRemovesStaleBindings(t *testing.T) {
 		t.Fatal("expected fresh binding to be retained")
 	}
 }
+
+// withAffinityConfig initialises config in a temp file and turns session
+// affinity on, restoring it to off on cleanup. SetSessionAffinityEnabled
+// dereferences the package-global cfg (nil until Init) and persists via Save,
+// so a config.Init on a throwaway path is mandatory — see pool/account_test.go
+// TestSessionAffinityBindsApiKeyToAccount for the same pattern.
+func withAffinityConfig(t *testing.T) {
+	t.Helper()
+	cfgFile := t.TempDir() + "/config.json"
+	if err := config.Init(cfgFile); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	if err := config.SetSessionAffinityEnabled(true); err != nil {
+		t.Fatalf("SetSessionAffinityEnabled(true): %v", err)
+	}
+	t.Cleanup(func() { _ = config.SetSessionAffinityEnabled(false) })
+}
+
+// TestAffinityRespectsModelSupport verifies session affinity does NOT return a
+// bound account that lacks the requested model — it must fall through to normal
+// selection instead of routing every request to a guaranteed failure.
+func TestAffinityRespectsModelSupport(t *testing.T) {
+	withAffinityConfig(t)
+	p := healthPool(
+		config.Account{ID: "bound", Enabled: true},
+		config.Account{ID: "other", Enabled: true},
+	)
+	p.modelLists["bound"] = map[string]bool{"sonnet": true}
+	p.modelLists["other"] = map[string]bool{"opus": true}
+	p.apiKeyAffinity["key"] = apiKeyBinding{accountID: "bound", lastUsed: time.Now()}
+
+	if acc := p.GetNextForModelWithApiKey("opus", nil, "key"); acc == nil || acc.ID == "bound" {
+		t.Fatalf("affinity must skip the bound account that lacks the model; got %#v", acc)
+	}
+}
+
+// TestAffinityRespectsQuotaBlock verifies a quota-blocked bound account is skipped.
+func TestAffinityRespectsQuotaBlock(t *testing.T) {
+	withAffinityConfig(t)
+	p := healthPool(
+		config.Account{ID: "bound", Enabled: true, UsageCurrent: 100, UsageLimit: 50}, // over limit, overages off
+		config.Account{ID: "other", Enabled: true},
+	)
+	p.apiKeyAffinity["key"] = apiKeyBinding{accountID: "bound", lastUsed: time.Now()}
+
+	if acc := p.GetNextForModelWithApiKey("", nil, "key"); acc == nil || acc.ID == "bound" {
+		t.Fatalf("affinity must skip a quota-blocked bound account; got %#v", acc)
+	}
+}

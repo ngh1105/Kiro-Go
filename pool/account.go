@@ -364,6 +364,12 @@ func (p *AccountPool) GetByID(id string) *config.Account {
 // already bound to the API key (session affinity). Falls back to health-aware
 // scoring if the bound account is unavailable or affinity is disabled.
 func (p *AccountPool) GetNextForModelWithApiKey(model string, excluded map[string]bool, apiKey string) *config.Account {
+	// Hoist config reads ABOVE any pool lock (same anti-pattern fixed in 58727ec
+	// for GetNextForModelExcluding) — never call config.* under p.mu, or a config
+	// Save() mid-write nests cfgLock under the pool lock and freezes every other
+	// pool operation. allowOverUsage feeds the quota gate below.
+	allowOverUsage := config.GetAllowOverUsage()
+
 	// Session affinity: try the bound account first.
 	if apiKey != "" && config.GetSessionAffinityEnabled() {
 		p.mu.RLock()
@@ -376,9 +382,19 @@ func (p *AccountPool) GetNextForModelWithApiKey(model string, excluded map[strin
 				isExcluded := excluded != nil && excluded[acc.ID]
 				p.mu.RLock()
 				cooldown, hasCooldown := p.cooldowns[acc.ID]
+				// Mirror the normal-path eligibility gates (GetNextForModelExcluding):
+				// model support (accountHasModel reads p.modelLists with no lock of its
+				// own, so it MUST run under p.mu.RLock) and quota. isQuotaBlocked is a
+				// pure function on the account value, but we read it here under the same
+				// lock to keep both gates consistent with one snapshot.
+				// Token-near-expiry is INTENTIONALLY NOT mirrored: a near-expiry token is
+				// still valid within refresh-skew and the handler refreshes it; gating on
+				// it would rebind the session to a different account every refresh window.
+				hasModel := model == "" || p.accountHasModel(acc.ID, model)
+				quotaBlocked := isQuotaBlocked(*acc, allowOverUsage)
 				p.mu.RUnlock()
 				cooldownActive := hasCooldown && time.Now().Before(cooldown)
-				if !isExcluded && !cooldownActive && !p.isCircuitOpen(acc.ID, time.Now()) {
+				if !isExcluded && !cooldownActive && !p.isCircuitOpen(acc.ID, time.Now()) && hasModel && !quotaBlocked {
 					now := time.Now()
 					p.mu.Lock()
 					binding.lastUsed = now
