@@ -5,6 +5,7 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"kiro-go/config"
@@ -427,6 +428,21 @@ func accountEmailForLog(account *config.Account) string {
 
 // ==================== Event Stream Parsing ====================
 
+// maxEventStreamMessageBytes caps a single AWS event-stream message's total
+// length before parseEventStream allocates a buffer for it. Real Kiro/AWS
+// event-stream messages are small (text deltas + tool JSON, low KB); a corrupt
+// or malicious 32-bit totalLength near 2^32 would otherwise drive a multi-GB
+// make([]byte, …) (alloc-panic under net/http's recover → connection dropped
+// with no terminal event → client hang) or hold a multi-GB buffer to the
+// 5-minute client timeout (memory-pressure DoS). 16 MiB is a generous ceiling.
+const maxEventStreamMessageBytes = 16 * 1024 * 1024
+
+// errEventStreamFrameTooLarge is returned by parseEventStream when a frame's
+// totalLength exceeds maxEventStreamMessageBytes, so the caller (CallKiroAPI)
+// funnels it into the upstream-error / response.failed path instead of
+// allocating gigabytes.
+var errEventStreamFrameTooLarge = errors.New("event-stream: frame totalLength exceeds maximum")
+
 // parseEventStream decodes an AWS binary Event Stream response body.
 func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 	if callback == nil {
@@ -456,6 +472,16 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 
 		if totalLength < 16 {
 			continue
+		}
+		// Reject a corrupt/malicious totalLength before the multi-GB make — a
+		// single bit-flip in this 32-bit field would otherwise drive
+		// make([]byte, ~4GB) (alloc-panic under net/http's per-request recover →
+		// no terminal event → client hang) or hold a multi-GB buffer to the 5-min
+		// client timeout (memory-pressure DoS). Returning an error here funnels
+		// the corrupt frame into the upstream-error / response.failed path
+		// instead of allocating gigabytes.
+		if totalLength > maxEventStreamMessageBytes {
+			return errEventStreamFrameTooLarge
 		}
 
 		// Read the remaining message bytes.
