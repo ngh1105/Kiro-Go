@@ -360,3 +360,27 @@ func TestProfileUnavailableDoesNotBanAccount(t *testing.T) {
 		t.Fatalf("profile-unavailable should NOT ban the account; got enabled=%v banStatus=%q", got.Enabled, got.BanStatus)
 	}
 }
+
+// TestClassifyAndBanOnUsageErrorBansOnGenuineAuthError verifies the background
+// refresh classifier still permanently bans an account on a genuine auth failure
+// (401) via the pool.IsAuthFailure branch — the positive complement to
+// TestFalseBanSubstringNoLongerDisables, which only proves a stray 403-in-token
+// does NOT ban. Without this, a refactor that dropped the auth ban would pass
+// all existing tests silently.
+func TestClassifyAndBanOnUsageErrorBansOnGenuineAuthError(t *testing.T) {
+	cfgFile := t.TempDir() + "/config.json"
+	if err := config.Init(cfgFile); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	if err := config.AddAccount(config.Account{ID: "acct", Enabled: true, Email: "a@b.c"}); err != nil {
+		t.Fatalf("AddAccount: %v", err)
+	}
+	acc, _ := config.GetAccountByID("acct")
+
+	_ = classifyAndBanOnUsageError(&acc, errors.New("HTTP 401 from primary: unauthorized"))
+
+	got, _ := config.GetAccountByID("acct")
+	if got.Enabled || got.BanStatus != "BANNED" {
+		t.Fatalf("genuine auth error should ban the account via the background classifier; got enabled=%v banStatus=%q", got.Enabled, got.BanStatus)
+	}
+}
