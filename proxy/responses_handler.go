@@ -42,8 +42,9 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 	}
 
 	var historyMessages []OpenAIMessage
+	apiKeyID := apiKeyIDFromContext(r.Context())
 	if req.PreviousResponseID != "" {
-		prev, loadErr := loadResponse(req.PreviousResponseID)
+		prev, loadErr := loadResponseForOwner(req.PreviousResponseID, apiKeyID)
 		if loadErr != nil {
 			h.sendOpenAIError(w, 404, "invalid_request_error",
 				fmt.Sprintf("previous_response_id not found: %v", loadErr))
@@ -110,7 +111,6 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 	estimatedInputTokens := estimateOpenAIRequestInputTokens(openaiReq)
 	kiroPayload := OpenAIToKiro(openaiReq, thinking)
 
-	apiKeyID := apiKeyIDFromContext(r.Context())
 	respID := generateResponseID()
 
 	if req.Stream {
@@ -194,6 +194,7 @@ func (h *Handler) handleResponsesNonStream(
 		respObj := buildResponsesObject(respID, model, finalContent, toolUses, inputTokens, outputTokens, req)
 		respObj.StoredInput = storedInput
 		respObj.Instructions = req.Instructions
+		respObj.OwnerKeyID = apiKeyID
 
 		if storeResponse {
 			if saveErr := saveResponse(respObj); saveErr != nil {
@@ -542,6 +543,7 @@ func (h *Handler) handleResponsesStream(
 		respObj.CreatedAt = createdAt
 		respObj.StoredInput = storedInput
 		respObj.Instructions = req.Instructions
+		respObj.OwnerKeyID = apiKeyID
 
 		if storeResponse {
 			if saveErr := saveResponse(respObj); saveErr != nil {

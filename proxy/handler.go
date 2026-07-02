@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -518,6 +519,8 @@ func buildAnthropicModelsResponse(cached []ModelInfo, thinkingSuffix string) []m
 
 func fallbackAnthropicModels(thinkingSuffix string) []map[string]interface{} {
 	return []map[string]interface{}{
+		buildModelInfo("claude-opus-4.8", "anthropic", true),
+		buildModelInfo("claude-opus-4.8"+thinkingSuffix, "anthropic", true),
 		buildModelInfo("claude-sonnet-4.6", "anthropic", true),
 		buildModelInfo("claude-sonnet-4.6"+thinkingSuffix, "anthropic", true),
 		buildModelInfo("claude-opus-4.6", "anthropic", true),
@@ -2187,7 +2190,8 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if password != config.GetPassword() {
+	expected := config.GetPassword()
+	if expected != "" && subtle.ConstantTimeCompare([]byte(password), []byte(expected)) != 1 {
 		w.WriteHeader(401)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Unauthorized"})
 		return
@@ -2250,6 +2254,8 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiPollKiroSso(w, r)
 	case path == "/auth/kiro-sso/cancel" && r.Method == "POST":
 		h.apiCancelKiroSso(w, r)
+	case path == "/auth/kiro-sso/callback" && r.Method == "POST":
+		h.apiCompleteKiroSso(w, r)
 	case path == "/auth/sso-token" && r.Method == "POST":
 		h.apiImportSsoToken(w, r)
 	case path == "/auth/credentials" && r.Method == "POST":
@@ -2886,6 +2892,46 @@ func (h *Handler) apiCancelKiroSso(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
 }
 
+// apiCompleteKiroSso lets an operator paste the OAuth callback URL for remote
+// deployments where localhost isn't the proxy host. The callback URL is fed
+// through the session's state machine; if a redirect is returned (enterprise
+// SSO leg-1) the front end should open it in a browser.
+func (h *Handler) apiCompleteKiroSso(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SessionID   string `json:"session_id"`
+		CallbackURL string `json:"callback_url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+		return
+	}
+	if req.SessionID == "" || req.CallbackURL == "" {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "session_id and callback_url are required"})
+		return
+	}
+
+	redirectURL, err := auth.FeedCallbackURL(req.SessionID, req.CallbackURL)
+	if err != nil {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	if redirectURL != "" {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":        "redirect",
+			"authorize_url": redirectURL,
+		})
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status": "accepted",
+	})
+}
+
 // apiPollKiroSso reports the hosted-portal sign-in status. While the user is signing in it
 // returns completed=false; once the listener captures the authorization code it exchanges it,
 // persists the account (AuthMethod "external_idp" for an Azure tenant, "social" otherwise), and
@@ -3283,11 +3329,11 @@ func (h *Handler) apiGetStatus(w http.ResponseWriter, r *http.Request) {
 		"version":         config.Version,
 		"accounts":        h.pool.Count(),
 		"available":       h.pool.AvailableCount(),
-		"totalRequests":   h.totalRequests,
-		"successRequests": h.successRequests,
-		"failedRequests":  h.failedRequests,
-		"totalTokens":     h.totalTokens,
-		"totalCredits":    h.totalCredits,
+		"totalRequests":   atomic.LoadInt64(&h.totalRequests),
+		"successRequests": atomic.LoadInt64(&h.successRequests),
+		"failedRequests":  atomic.LoadInt64(&h.failedRequests),
+		"totalTokens":     atomic.LoadInt64(&h.totalTokens),
+		"totalCredits":    h.getCredits(),
 		"uptime":          time.Now().Unix() - h.startTime,
 	})
 }

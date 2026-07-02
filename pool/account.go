@@ -115,7 +115,7 @@ func (p *AccountPool) GetNextExcluding(excluded map[string]bool) *config.Account
 			continue
 		}
 
-		return acc
+		return copyAccount(acc)
 	}
 
 		// 无可用账号，返回冷却时间最短的（排除额度用尽的，除非允许超额）
@@ -135,10 +135,13 @@ func (p *AccountPool) GetNextExcluding(excluded map[string]bool) *config.Account
 				earliest = cooldown
 			}
 		} else {
-			return acc
+			return copyAccount(acc)
 		}
 	}
-	return best
+	if best != nil {
+		return copyAccount(best)
+	}
+	return nil
 }
 
 // SetModelList 缓存账号支持的模型集合（由 handler 在刷新后调用）
@@ -226,7 +229,7 @@ func (p *AccountPool) GetNextForModelExcluding(model string, excluded map[string
 			seen[acc.ID] = true
 			continue
 		}
-		return acc
+		return copyAccount(acc)
 	}
 
 	// fallback：找冷却时间最短且支持该模型的账号
@@ -249,10 +252,13 @@ func (p *AccountPool) GetNextForModelExcluding(model string, excluded map[string
 				earliest = cooldown
 			}
 		} else {
-			return acc
+			return copyAccount(acc)
 		}
 	}
-	return best
+	if best != nil {
+		return copyAccount(best)
+	}
+	return nil
 }
 
 // GetByID 根据 ID 获取账号
@@ -261,7 +267,7 @@ func (p *AccountPool) GetByID(id string) *config.Account {
 	defer p.mu.RUnlock()
 	for i := range p.accounts {
 		if p.accounts[i].ID == id {
-			return &p.accounts[i]
+			return copyAccount(&p.accounts[i])
 		}
 	}
 	return nil
@@ -498,4 +504,11 @@ func effectiveWeight(weight int) int {
 		return 1
 	}
 	return weight
+}
+
+// copyAccount returns a shallow copy of the account, safe to use after
+// the pool lock is released.
+func copyAccount(acc *config.Account) *config.Account {
+	c := *acc
+	return &c
 }
