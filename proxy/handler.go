@@ -460,6 +460,7 @@ func (h *Handler) handleStats(w http.ResponseWriter, r *http.Request) {
 		"failedRequests":  atomic.LoadInt64(&h.failedRequests),
 		"totalTokens":     atomic.LoadInt64(&h.totalTokens),
 		"totalCredits":    h.getCredits(),
+		"cache":           h.promptCache.Stats(),
 		"uptime":          time.Now().Unix() - h.startTime,
 	})
 }
