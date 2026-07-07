@@ -96,13 +96,13 @@ var defaultKiroProfileRegions = []string{"us-east-1", "eu-central-1"}
 
 // kiroProfileRegionCandidates returns the ordered, de-duplicated list of regions
 // to probe for an account's Kiro profile. The account's currently-configured region
-// is always tried first. Cross-region fallbacks are only added when the home region
-// is genuinely unknown — an external_idp (Azure-tenant) login, which defaults to
-// us-east-1, or an account with no region at all. An idc/social/Builder ID account
-// already carries its real region (from the SSO portal / the us-east-1 default), so
-// it is probed against that single region exactly as before — no extra upstream calls
-// and no chance of its established region being flipped. KIRO_PROFILE_REGIONS, when
-// set, replaces the built-in fallback set (the account region is still tried first).
+// is always tried first. Cross-region fallbacks are added for auth methods whose
+// login region does not guarantee the profile region: external_idp (Azure-tenant,
+// defaults to us-east-1) and idc (IAM Identity Center / enterprise SSO, where a
+// us-east-1 portal can provision profiles in eu-central-1). social and Builder ID
+// accounts carry their authoritative region and are probed against that single
+// region only. KIRO_PROFILE_REGIONS, when set, replaces the built-in fallback set
+// (the account region is still tried first).
 func kiroProfileRegionCandidates(account *config.Account) []string {
 	seen := make(map[string]bool)
 	var out []string
@@ -133,10 +133,13 @@ func kiroProfileRegionCandidates(account *config.Account) []string {
 	return out
 }
 
-// shouldProbeFallbackRegions reports whether an account's home region is unknown
-// enough to justify probing fallback regions. Only external_idp accounts (region
-// defaulted to us-east-1 at login) and accounts with no region set qualify; every
-// other auth method already carries its authoritative region.
+// shouldProbeFallbackRegions reports whether an account should probe fallback
+// regions when its home region returns no profile. external_idp accounts always
+// qualify (region defaulted to us-east-1 at login). idc (IAM Identity Center /
+// enterprise SSO) accounts also qualify: an enterprise SSO portal in us-east-1
+// can provision profiles in eu-central-1, so the auth region does not imply the
+// profile region. social and Builder ID accounts carry their authoritative
+// region and are not probed further.
 func shouldProbeFallbackRegions(account *config.Account) bool {
 	if account == nil {
 		return true
@@ -144,7 +147,8 @@ func shouldProbeFallbackRegions(account *config.Account) bool {
 	if strings.TrimSpace(account.Region) == "" {
 		return true
 	}
-	return strings.EqualFold(strings.TrimSpace(account.AuthMethod), "external_idp")
+	method := strings.TrimSpace(account.AuthMethod)
+	return strings.EqualFold(method, "external_idp") || strings.EqualFold(method, "idc")
 }
 
 // GetUsageLimits 获取账户使用量和订阅信息
@@ -547,8 +551,7 @@ func RefreshAccountInfo(account *config.Account) (*config.AccountInfo, error) {
 			}
 
 			return nil, fmt.Errorf("Account suspended: %w", err)
-		} else if strings.Contains(errMsg, "403") || strings.Contains(errMsg, "401") ||
-			strings.Contains(errMsg, "invalid") || strings.Contains(errMsg, "expired") {
+		} else if isAuthErrorMessage(errMsg) {
 			// Token 相关错误，可能需要重新认证
 			logger.Warnf("[RefreshAccountInfo] Authentication error for %s: %v", account.Email, err)
 
