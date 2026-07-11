@@ -17,7 +17,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"runtime"
 	"sync"
 	"time"
 )
@@ -47,6 +46,86 @@ func GenerateMachineId() string {
 func DeriveMachineId(accountID string) string {
 	sum := sha256.Sum256([]byte("kiro-device-" + accountID))
 	return hex.EncodeToString(sum[:])
+}
+
+// clientProfile is one entry in the desktop fingerprint pool: a real
+// {OS#kernel, KiroIDE version, node version} triple that a genuine Kiro IDE
+// install would report. Every value here MUST be a combination that actually
+// shipped — fabricating version numbers would create a fresh "non-genuine
+// client" signal, which is exactly what we are trying to avoid. Ported from
+// kiro-tutu (zero-dep).
+type clientProfile struct {
+	systemVersion string
+	kiroVersion   string
+	nodeVersion   string
+	weight        int
+}
+
+// clientProfilePool is the weighted distribution of desktop fingerprints used
+// to derive a per-account {platform, version} triple.
+//
+// Design constraints:
+//   - macOS-weighted, with a small Windows minority, matching the real account
+//     source distribution. A wrong distribution manufactures a new
+//     "unrealistic population" signal.
+//   - NEVER contains Linux. A Linux server kernel in a Kiro IDE UA is the
+//     single strongest "not a real user" tell; this pool guarantees the output
+//     platform is always mac/win regardless of runtime.GOOS — so a deploy on a
+//     Linux box no longer advertises linux#6.6.87 in every request's UA.
+//   - Every systemVersion is a verified real macOS↔Darwin / Windows build:
+//     darwin#23.6.0 = macOS 14.6 (Sonoma), darwin#24.5.0 = macOS 15.5,
+//     darwin#24.6.0 = macOS 15.6 (Sequoia); win32#10.0.22631 = Win11 23H2,
+//     win32#10.0.19045 = Win10 22H2.
+//   - KiroVersion/NodeVersion stay on the one combination confirmed against a
+//     genuine client (0.11.107 / 22.22.0). Version uniformity is expected
+//     (real users auto-update), so only the platform dimension is diversified.
+var clientProfilePool = []clientProfile{
+	{systemVersion: "darwin#24.6.0", kiroVersion: "0.11.107", nodeVersion: "22.22.0", weight: 35},    // macOS 15.6 Sequoia
+	{systemVersion: "darwin#24.5.0", kiroVersion: "0.11.107", nodeVersion: "22.22.0", weight: 25},    // macOS 15.5 Sequoia
+	{systemVersion: "darwin#23.6.0", kiroVersion: "0.11.107", nodeVersion: "22.22.0", weight: 25},    // macOS 14.6 Sonoma
+	{systemVersion: "win32#10.0.22631", kiroVersion: "0.11.107", nodeVersion: "22.22.0", weight: 10}, // Win11 23H2
+	{systemVersion: "win32#10.0.19045", kiroVersion: "0.11.107", nodeVersion: "22.22.0", weight: 5},  // Win10 22H2
+}
+
+// DeriveClientProfile deterministically derives a stable desktop fingerprint
+// for an account by hashing sha256("kiro-profile-" + accountID) and selecting
+// from clientProfilePool by cumulative weight. It is a pure function: the same
+// account ID always yields the same {platform, version} triple, across
+// requests and across restarts, so an account looks like a single fixed
+// desktop install — and it never returns a Linux platform regardless of the
+// host OS.
+//
+// The "kiro-profile-" prefix differs from DeriveMachineId's "kiro-device-" so
+// the platform selection is independent of the device-id hash, while both
+// remain stably bound to the same account.
+func DeriveClientProfile(accountID string) clientProfile {
+	totalWeight := 0
+	for _, p := range clientProfilePool {
+		totalWeight += p.weight
+	}
+	if totalWeight <= 0 || len(clientProfilePool) == 0 {
+		// Defensive: a misconfigured pool must still never emit Linux. Fall back
+		// to the first verified mac entry rather than runtime.GOOS.
+		return clientProfile{systemVersion: "darwin#24.6.0", kiroVersion: "0.11.107", nodeVersion: "22.22.0"}
+	}
+
+	sum := sha256.Sum256([]byte("kiro-profile-" + accountID))
+	// Use the first 8 bytes as an unsigned 64-bit selector, then mod by total
+	// weight. Deterministic and uniform enough for distribution purposes.
+	var selector uint64
+	for i := 0; i < 8; i++ {
+		selector = selector<<8 | uint64(sum[i])
+	}
+	target := int(selector % uint64(totalWeight))
+
+	cumulative := 0
+	for _, p := range clientProfilePool {
+		cumulative += p.weight
+		if target < cumulative {
+			return p
+		}
+	}
+	return clientProfilePool[len(clientProfilePool)-1] // unreachable, defensive
 }
 
 // Account represents a Kiro API account with authentication credentials and usage statistics.
@@ -1158,48 +1237,48 @@ func UpdateLogLevel(level string) error {
 	return Save()
 }
 
+// KiroClientConfig is the {KiroVersion, SystemVersion, NodeVersion} triple
+// embedded into the upstream User-Agent. Populated by GetKiroClientConfig.
 type KiroClientConfig struct {
 	KiroVersion   string
 	SystemVersion string
 	NodeVersion   string
 }
 
-func GetKiroClientConfig() KiroClientConfig {
+// GetKiroClientConfig resolves the {KiroVersion, SystemVersion, NodeVersion}
+// triple for accountID. When no operator override is set on a field, it derives
+// a stable desktop fingerprint from the account via DeriveClientProfile — which
+// selects from clientProfilePool (mac/win-weighted) and NEVER returns Linux, so
+// a deploy on a Linux box no longer advertises linux#6.6.87 in every request's
+// User-Agent. An empty accountID still yields a stable mac-default profile
+// (never Linux). Ported from kiro-tutu (zero-dep).
+//
+// Operator overrides from config (KiroVersion/SystemVersion/NodeVersion) take
+// precedence per-field when explicitly set, preserving the manual-override path.
+func GetKiroClientConfig(accountID string) KiroClientConfig {
 	cfgLock.RLock()
 	defer cfgLock.RUnlock()
 
-	kiroVersion := "0.11.107"
-	if cfg != nil && cfg.KiroVersion != "" {
-		kiroVersion = cfg.KiroVersion
-	}
+	profile := DeriveClientProfile(accountID)
+	kiroVersion := profile.kiroVersion
+	systemVersion := profile.systemVersion
+	nodeVersion := profile.nodeVersion
 
-	systemVersion := ""
 	if cfg != nil {
-		systemVersion = cfg.SystemVersion
-	}
-	if systemVersion == "" {
-		systemVersion = defaultSystemVersion()
-	}
-
-	nodeVersion := "22.22.0"
-	if cfg != nil && cfg.NodeVersion != "" {
-		nodeVersion = cfg.NodeVersion
+		if cfg.KiroVersion != "" {
+			kiroVersion = cfg.KiroVersion
+		}
+		if cfg.SystemVersion != "" {
+			systemVersion = cfg.SystemVersion
+		}
+		if cfg.NodeVersion != "" {
+			nodeVersion = cfg.NodeVersion
+		}
 	}
 
 	return KiroClientConfig{
 		KiroVersion:   kiroVersion,
 		SystemVersion: systemVersion,
 		NodeVersion:   nodeVersion,
-	}
-}
-
-func defaultSystemVersion() string {
-	switch runtime.GOOS {
-	case "windows":
-		return "win32#10.0.22631"
-	case "darwin":
-		return "darwin#24.6.0"
-	default:
-		return "linux#6.6.87"
 	}
 }

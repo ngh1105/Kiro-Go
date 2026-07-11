@@ -26,7 +26,14 @@ func buildRuntimeHeaderValues(account *config.Account, host string) kiroHeaderVa
 }
 
 func buildKiroHeaderValues(account *config.Account, host, apiName, sdkVersion, mode string) kiroHeaderValues {
-	clientCfg := config.GetKiroClientConfig()
+	accountID := ""
+	if account != nil {
+		accountID = account.ID
+	}
+	// Derive the desktop fingerprint (platform/version) from the same accountID
+	// used for the device id below, so an account's platform and device stay
+	// mutually consistent — one stable mac/win install, never a Linux server.
+	clientCfg := config.GetKiroClientConfig(accountID)
 	machineID := ""
 	if account != nil {
 		machineID = account.MachineId
