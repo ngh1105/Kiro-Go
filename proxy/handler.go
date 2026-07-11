@@ -450,6 +450,7 @@ func (h *Handler) handleStats(w http.ResponseWriter, r *http.Request) {
 		"totalTokens":     atomic.LoadInt64(&h.totalTokens),
 		"totalCredits":    h.getCredits(),
 		"cache":           h.promptCache.Stats(),
+		"cacheWindows":    cacheMetricsSnapshotByWindows(time.Now()),
 		"uptime":          time.Now().Unix() - h.startTime,
 	})
 }
@@ -1221,6 +1222,9 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			lastErr = err
 			excluded[account.ID] = true
 			h.handleAccountFailure(account, err)
+			// Cache-dispatch observability: failed dispatch contributes 0 tokens so
+			// it cannot inflate the simulated cache_read subsidy (see cache_metrics.go).
+			recordClaudeCacheDispatch("failure", model, "stream", account, promptCacheUsage{}, 0, 0)
 			if isUpstreamPermanentError(err) {
 				// Malformed request — no other account can succeed. Stop retrying;
 				// lastErr flows to the client. The relaying account was left neutral
@@ -1274,6 +1278,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 		h.promptCache.Update(account.ID, cacheProfile)
 		h.recordSuccessLog("claude", model, account.ID, inputTokens+outputTokens, credits, time.Since(reqStart).Milliseconds())
+		recordClaudeCacheDispatch("success", model, "stream", account, cacheUsage, inputTokens, outputTokens)
 
 		stopReason := "end_turn"
 		if len(toolUses) > 0 {
@@ -1515,6 +1520,9 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 			lastErr = err
 			excluded[account.ID] = true
 			h.handleAccountFailure(account, err)
+			// Cache-dispatch observability: failed dispatch contributes 0 tokens so
+			// it cannot inflate the simulated cache_read subsidy (see cache_metrics.go).
+			recordClaudeCacheDispatch("failure", model, "nonstream", account, promptCacheUsage{}, 0, 0)
 			if isUpstreamPermanentError(err) {
 				break
 			}
@@ -1553,6 +1561,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 		h.promptCache.Update(account.ID, cacheProfile)
 		h.recordSuccessLog("claude", model, account.ID, inputTokens+outputTokens, credits, time.Since(reqStart).Milliseconds())
+		recordClaudeCacheDispatch("success", model, "nonstream", account, cacheUsage, inputTokens, outputTokens)
 
 		responseThinkingContent := rawThinkingContent
 		includeEmptyThinkingBlock := thinking && thinkingOpts.OmitDisplay && rawThinkingContent != ""
