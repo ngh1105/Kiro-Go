@@ -841,6 +841,12 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 	}
 }
 
+// streamKeepaliveInterval 是流式响应期间向客户端发送 SSE 保活注释行的间隔。远小于
+// Cloudflare ~120s 的 Proxy Read Timeout，确保上游长静默（opus 高强度 thinking 两个数据
+// 块之间、或去掉总超时后的超长推理）期间客户端/CDN 连接不被中途判超时断开。为 var 以便
+// 测试注入更小的间隔来覆盖"流中途静默触发 ping 与数据并发写"路径。Ported from kiro-tutu。
+var streamKeepaliveInterval = 10 * time.Second
+
 // handleClaudeStream Claude 流式响应
 func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID string) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
@@ -852,6 +858,58 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		h.sendClaudeError(w, 500, "api_error", "Streaming not supported")
 		return
 	}
+
+	// SSE 保活：整个流式期间（不止首字节前）周期性发送注释行，使 200 响应头立即抵达
+	// 客户端/CDN 并持续刷新其 Proxy Read Timeout——既覆盖上游 prefill 迟迟不返回首字节，
+	// 也覆盖上游输出中途长静默（opus 高强度 thinking 两个数据块之间可静默数十秒，且本服务
+	// 已去掉总超时），避免客户端/CDN 在 ~120s 处判超时断开（用户侧表现为"说一半就断"）。
+	// ':' 开头的注释行被 Anthropic SDK / Claude Code 等客户端忽略，不污染响应内容。
+	//
+	// 并发：保活 goroutine 与主 goroutine 都会写 w，故所有真实事件写出统一走 emit()，与
+	// 保活共用 hbMu 串行化；lastWriteNano 记录最近一次写出时刻，保活仅在距上次写出已满
+	// streamKeepaliveInterval（确有静默）时才补发，数据正常流动时不插入多余注释行。
+	var hbMu sync.Mutex
+	hbStopped := false
+	committed := false // 200 响应头是否已 flush 到客户端（由保活触发）
+	lastWriteNano := time.Now().UnixNano()
+	hbDone := make(chan struct{})
+	var hbStopOnce sync.Once
+	stopHeartbeat := func() {
+		hbStopOnce.Do(func() {
+			hbMu.Lock()
+			hbStopped = true
+			hbMu.Unlock()
+			close(hbDone)
+		})
+	}
+	defer stopHeartbeat()
+
+	emit := func(event string, data interface{}) {
+		hbMu.Lock()
+		h.sendSSE(w, flusher, event, data)
+		lastWriteNano = time.Now().UnixNano()
+		hbMu.Unlock()
+	}
+
+	go func() {
+		ticker := time.NewTicker(streamKeepaliveInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-hbDone:
+				return
+			case <-ticker.C:
+				hbMu.Lock()
+				if !hbStopped && time.Since(time.Unix(0, lastWriteNano)) >= streamKeepaliveInterval {
+					fmt.Fprint(w, ": keepalive\n\n")
+					flusher.Flush()
+					committed = true
+					lastWriteNano = time.Now().UnixNano()
+				}
+				hbMu.Unlock()
+			}
+		}
+	}()
 
 	// 获取 thinking 输出格式配置
 	thinkingFormat := thinkingOpts.Format
@@ -868,7 +926,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		if messageStarted {
 			return
 		}
-		h.sendSSE(w, flusher, "message_start", map[string]interface{}{
+		emit("message_start", map[string]interface{}{
 			"type": "message_start",
 			"message": map[string]interface{}{
 				"id":            msgID,
@@ -916,7 +974,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			if activeBlockIndex < 0 {
 				return
 			}
-			h.sendSSE(w, flusher, "content_block_stop", map[string]interface{}{
+			emit("content_block_stop", map[string]interface{}{
 				"type":  "content_block_stop",
 				"index": activeBlockIndex,
 			})
@@ -935,7 +993,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			nextContentIndex++
 
 			if blockType == "thinking" {
-				h.sendSSE(w, flusher, "content_block_start", map[string]interface{}{
+				emit("content_block_start", map[string]interface{}{
 					"type":  "content_block_start",
 					"index": idx,
 					"content_block": map[string]string{
@@ -944,7 +1002,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 					},
 				})
 			} else {
-				h.sendSSE(w, flusher, "content_block_start", map[string]interface{}{
+				emit("content_block_start", map[string]interface{}{
 					"type":  "content_block_start",
 					"index": idx,
 					"content_block": map[string]string{
@@ -971,7 +1029,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 					return
 				}
 				startContentBlock("text")
-				h.sendSSE(w, flusher, "content_block_delta", map[string]interface{}{
+				emit("content_block_delta", map[string]interface{}{
 					"type":  "content_block_delta",
 					"index": activeBlockIndex,
 					"delta": map[string]string{"type": "text_delta", "text": text},
@@ -998,7 +1056,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 					return
 				}
 				startContentBlock("text")
-				h.sendSSE(w, flusher, "content_block_delta", map[string]interface{}{
+				emit("content_block_delta", map[string]interface{}{
 					"type":  "content_block_delta",
 					"index": activeBlockIndex,
 					"delta": map[string]string{"type": "text_delta", "text": outputText},
@@ -1008,7 +1066,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 					return
 				}
 				startContentBlock("text")
-				h.sendSSE(w, flusher, "content_block_delta", map[string]interface{}{
+				emit("content_block_delta", map[string]interface{}{
 					"type":  "content_block_delta",
 					"index": activeBlockIndex,
 					"delta": map[string]string{"type": "text_delta", "text": text},
@@ -1035,7 +1093,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				}
 				if text != "" {
 					startContentBlock("thinking")
-					h.sendSSE(w, flusher, "content_block_delta", map[string]interface{}{
+					emit("content_block_delta", map[string]interface{}{
 						"type":  "content_block_delta",
 						"index": activeBlockIndex,
 						"delta": map[string]string{"type": "thinking_delta", "thinking": text},
@@ -1179,7 +1237,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				idx := nextContentIndex
 				nextContentIndex++
 
-				h.sendSSE(w, flusher, "content_block_start", map[string]interface{}{
+				emit("content_block_start", map[string]interface{}{
 					"type":  "content_block_start",
 					"index": idx,
 					"content_block": map[string]interface{}{
@@ -1191,7 +1249,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				})
 
 				inputJSON, _ := json.Marshal(tu.Input)
-				h.sendSSE(w, flusher, "content_block_delta", map[string]interface{}{
+				emit("content_block_delta", map[string]interface{}{
 					"type":  "content_block_delta",
 					"index": idx,
 					"delta": map[string]interface{}{
@@ -1200,7 +1258,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 					},
 				})
 
-				h.sendSSE(w, flusher, "content_block_stop", map[string]interface{}{
+				emit("content_block_stop", map[string]interface{}{
 					"type":  "content_block_stop",
 					"index": idx,
 				})
@@ -1235,7 +1293,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				continue
 			}
 			h.recordFailureWithDetails("claude", model, account.ID, err)
-			h.sendSSE(w, flusher, "error", map[string]interface{}{
+			emit("error", map[string]interface{}{
 				"type":  "error",
 				"error": map[string]string{"type": "api_error", "message": err.Error()},
 			})
@@ -1286,7 +1344,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		}
 
 		ensureMessageStart()
-		h.sendSSE(w, flusher, "message_delta", map[string]interface{}{
+		emit("message_delta", map[string]interface{}{
 			"type": "message_delta",
 			"delta": map[string]interface{}{
 				"stop_reason": stopReason,
@@ -1294,7 +1352,41 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			"usage": buildClaudeUsageMap(inputTokens, outputTokens, cacheUsage, cacheProfile != nil),
 		})
 
-		h.sendSSE(w, flusher, "message_stop", map[string]interface{}{
+		emit("message_stop", map[string]interface{}{
+			"type": "message_stop",
+		})
+		return
+	}
+
+	// 循环外的错误/无账号路径。保活 goroutine 可能仍在写 w，先停掉再决定响应形态，
+	// 避免 sendClaudeError 的 WriteHeader+JSON 与心跳的 ': keepalive' 并发写同一个 w。
+	stopHeartbeat()
+	if lastErr != nil {
+		h.recordFailureWithDetails("claude", model, "", lastErr)
+	}
+	hbMu.Lock()
+	didCommit := committed
+	hbMu.Unlock()
+
+	if didCommit {
+		// 心跳已落地 200 响应头：HTTP 状态码已无法更改，客户端正按 SSE 解析——必须以
+		// SSE error 序列收尾，而非 sendClaudeError 的 WriteHeader+JSON（后者会触发
+		// superfluous WriteHeader 告警且破坏流式协议）。
+		msg := "No available accounts"
+		if lastErr != nil {
+			msg = lastErr.Error()
+		}
+		ensureMessageStart()
+		emit("error", map[string]interface{}{
+			"type":  "error",
+			"error": map[string]string{"type": "api_error", "message": msg},
+		})
+		emit("message_delta", map[string]interface{}{
+			"type":  "message_delta",
+			"delta": map[string]interface{}{"stop_reason": "error"},
+			"usage": map[string]interface{}{"output_tokens": 0},
+		})
+		emit("message_stop", map[string]interface{}{
 			"type": "message_stop",
 		})
 		return
@@ -1305,7 +1397,6 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		return
 	}
 
-	h.recordFailureWithDetails("claude", model, "", lastErr)
 	h.sendClaudeError(w, 500, "api_error", lastErr.Error())
 }
 
@@ -1668,6 +1759,59 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 		return
 	}
 
+	// 流式保活：与 handleClaudeStream 同构。整个流式期间周期性发送 SSE 注释行（OpenAI 流
+	// 亦以 ':' 注释行合法、客户端忽略），落地 200 头并持续刷新 CF/客户端的 Proxy Read
+	// Timeout，既覆盖上游 prefill 迟迟无首字节、也覆盖输出中途长静默（opus 高强度 thinking
+	// 两个数据块之间、去掉 5min 总超时后的超长推理），避免连接在 ~120s 处被判超时断开
+	// （用户侧表现为“说一半就断”）。
+	//
+	// 并发：保活 goroutine 与主 goroutine 都会写 w，故所有真实 chunk 写出统一走 emitRaw()，
+	// 与保活共用 hbMu 串行化；lastWriteNano 记录最近写出时刻，保活仅在确有静默时才补发。
+	var hbMu sync.Mutex
+	hbStopped := false
+	committed := false // 200 响应头是否已 flush 到客户端（由保活或首个真实 chunk 触发）
+	lastWriteNano := time.Now().UnixNano()
+	hbDone := make(chan struct{})
+	var hbStopOnce sync.Once
+	stopHeartbeat := func() {
+		hbStopOnce.Do(func() {
+			hbMu.Lock()
+			hbStopped = true
+			hbMu.Unlock()
+			close(hbDone)
+		})
+	}
+	defer stopHeartbeat()
+
+	// emitRaw 串行化所有真实 chunk 写出，与保活 goroutine 互斥（共用 hbMu），并记录写出时刻。
+	emitRaw := func(s string) {
+		hbMu.Lock()
+		fmt.Fprint(w, s)
+		flusher.Flush()
+		lastWriteNano = time.Now().UnixNano()
+		hbMu.Unlock()
+	}
+
+	go func() {
+		ticker := time.NewTicker(streamKeepaliveInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-hbDone:
+				return
+			case <-ticker.C:
+				hbMu.Lock()
+				if !hbStopped && time.Since(time.Unix(0, lastWriteNano)) >= streamKeepaliveInterval {
+					fmt.Fprint(w, ": keepalive\n\n")
+					flusher.Flush()
+					committed = true
+					lastWriteNano = time.Now().UnixNano()
+				}
+				hbMu.Unlock()
+			}
+		}
+	}()
+
 	// 获取 thinking 输出格式配置
 	thinkingFormat := config.GetThinkingConfig().OpenAIFormat
 
@@ -1800,8 +1944,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 				}
 			}
 			data, _ := json.Marshal(chunk)
-			fmt.Fprintf(w, "data: %s\n\n", string(data))
-			flusher.Flush()
+			emitRaw(fmt.Sprintf("data: %s\n\n", string(data)))
 			responseStarted = true
 		}
 
@@ -1957,8 +2100,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 				}
 				toolCallIndex++
 				data, _ := json.Marshal(chunk)
-				fmt.Fprintf(w, "data: %s\n\n", string(data))
-				flusher.Flush()
+				emitRaw(fmt.Sprintf("data: %s\n\n", string(data)))
 				responseStarted = true
 			},
 			OnComplete: func(inTok, outTok int) {
@@ -2043,9 +2185,44 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 			},
 		}
 		data, _ := json.Marshal(chunk)
-		fmt.Fprintf(w, "data: %s\n\n", string(data))
-		fmt.Fprintf(w, "data: [DONE]\n\n")
-		flusher.Flush()
+		emitRaw(fmt.Sprintf("data: %s\n\n", string(data)))
+		emitRaw("data: [DONE]\n\n")
+		return
+	}
+
+	// 循环外的错误/无账号路径。保活 goroutine 可能仍在写 w，先停掉再决定响应形态，
+	// 避免 sendOpenAIError 的 WriteHeader+JSON 与心跳的 ': keepalive' 并发写同一个 w。
+	stopHeartbeat()
+	if lastErr != nil {
+		h.recordFailureWithDetails("openai", model, "", lastErr)
+	}
+	hbMu.Lock()
+	didCommit := committed
+	hbMu.Unlock()
+
+	if didCommit {
+		// 心跳已落地 200 响应头：HTTP 状态码已无法更改，客户端正按 SSE 解析——必须以
+		// SSE error chunk + [DONE] 收尾，而非 sendOpenAIError 的 WriteHeader+JSON（后者
+		// 会触发 superfluous WriteHeader 且破坏流式协议）。
+		msg := "No available accounts"
+		if lastErr != nil {
+			msg = lastErr.Error()
+		}
+		errChunk := map[string]interface{}{
+			"id":      chatID,
+			"object":  "chat.completion.chunk",
+			"created": time.Now().Unix(),
+			"model":   model,
+			"choices": []map[string]interface{}{{
+				"index":         0,
+				"delta":         map[string]interface{}{},
+				"finish_reason": "error",
+			}},
+			"error": map[string]string{"message": msg},
+		}
+		errData, _ := json.Marshal(errChunk)
+		emitRaw(fmt.Sprintf("data: %s\n\n", string(errData)))
+		emitRaw("data: [DONE]\n\n")
 		return
 	}
 
@@ -2054,7 +2231,6 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 		return
 	}
 
-	h.recordFailureWithDetails("openai", model, "", lastErr)
 	h.sendOpenAIError(w, 500, "server_error", lastErr.Error())
 }
 
