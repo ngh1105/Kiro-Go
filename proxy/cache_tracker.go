@@ -23,7 +23,13 @@ const defaultPromptCacheTTL = 5 * time.Minute
 // matching and storage to avoid reporting unrealistic 100% cache hits on
 // short requests.
 const defaultMinCacheableTokens = 1024
-const opusMinCacheableTokens = 4096
+
+// opusMinCacheableTokens is the minimum cacheable prefix size for Opus models.
+// Anthropic's real prompt-cache threshold is ~1024 tokens (Claude 4 family);
+// the previous 4096 excluded many valid Opus breakpoints, so an Opus
+// conversation would report far fewer cache hits than it actually earned.
+// Ported from kiro-tutu (opusMinCacheableTokens = 1024).
+const opusMinCacheableTokens = 1024
 
 type promptCacheUsage struct {
 	CacheCreationInputTokens   int
