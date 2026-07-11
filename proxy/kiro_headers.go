@@ -30,6 +30,16 @@ func buildKiroHeaderValues(account *config.Account, host, apiName, sdkVersion, m
 	machineID := ""
 	if account != nil {
 		machineID = account.MachineId
+		// Never let machineId be empty: an empty value drops the UA suffix and
+		// makes this account's User-Agent identical to every other empty-id
+		// account, which is the strongest cross-account association signal
+		// upstream can correlate on. Fall back to a stable, account-derived
+		// 64-hex id (sha256) so the UA always carries a unique, fixed device
+		// fingerprint — same value per account across requests and restarts.
+		// Ported from kiro-tutu (zero-dep: config.DeriveMachineId is stdlib).
+		if machineID == "" && account.ID != "" {
+			machineID = config.DeriveMachineId(account.ID)
+		}
 	}
 
 	userAgent := fmt.Sprintf(

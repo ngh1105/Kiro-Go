@@ -12,6 +12,8 @@ package config
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -30,6 +32,21 @@ func GenerateMachineId() string {
 	bytes[8] = (bytes[8] & 0x3f) | 0x80 // 变体
 	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
 		bytes[0:4], bytes[4:6], bytes[6:8], bytes[8:10], bytes[10:16])
+}
+
+// DeriveMachineId deterministically derives a stable 64-hex device id from an
+// account ID via sha256("kiro-device-" + accountID). It is a pure function:
+// the same account ID always yields the same value, so an account looks like a
+// single fixed device across requests and across restarts. Ported from
+// kiro-tutu (zero-dep: stdlib crypto/sha256 + encoding/hex).
+//
+// Used as the empty-MachineId fallback in kiro_headers.go so every account's
+// User-Agent always carries a unique, stable device suffix instead of all
+// empty-id accounts sharing an identical UA (the strongest cross-account
+// association signal upstream can correlate on).
+func DeriveMachineId(accountID string) string {
+	sum := sha256.Sum256([]byte("kiro-device-" + accountID))
+	return hex.EncodeToString(sum[:])
 }
 
 // Account represents a Kiro API account with authentication credentials and usage statistics.
