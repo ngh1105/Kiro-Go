@@ -67,6 +67,11 @@ func main() {
 	// 初始化账号池
 	pool.GetPool()
 
+	// 初始化请求审计持久化（默认 JSONL，失败自动禁用；KIRO_AUDIT_DISABLE 可关闭）。
+	// 审计写入异步非阻塞，缓冲满即丢弃并计数（kiro_audit_dropped_total），绝不拖垮主流程。
+	proxy.InitAuditStore(filepath.Dir(configPath))
+	defer proxy.CloseAuditStore()
+
 	// 创建 HTTP 处理器（包含后台刷新任务）
 	handler := proxy.NewHandler()
 

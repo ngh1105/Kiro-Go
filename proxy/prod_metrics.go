@@ -41,6 +41,7 @@ var counterHelp = map[string]string{
 	"kiro_http_requests_total":      "Total HTTP requests handled, labelled by method, code and path class.",
 	"kiro_ratelimit_rejected_total": "Total inbound requests rejected by the rate limiter.",
 	"kiro_panics_recovered_total":   "Total panics recovered by the recovery middleware.",
+	"kiro_audit_dropped_total":      "Audit entries dropped because the async buffer was full.",
 	"kiro_token_refresh_total":      "Total OAuth token refresh attempts, by result.",
 }
 
@@ -190,6 +191,7 @@ func metricsRequest(method, code, pathClass string) {
 }
 func metricsRateLimited() { globalMetrics.incCounter("kiro_ratelimit_rejected_total") }
 func metricsPanic()       { globalMetrics.incCounter("kiro_panics_recovered_total") }
+func metricsAuditDropped() { globalMetrics.incCounter("kiro_audit_dropped_total") }
 func metricsTokenRefresh(result string) {
 	globalMetrics.incCounter(metricSeries("kiro_token_refresh_total", [][2]string{{"result", result}}))
 }

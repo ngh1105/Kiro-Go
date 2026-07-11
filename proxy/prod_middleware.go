@@ -18,7 +18,10 @@ package proxy
 // correspondingly omitted from the metrics.
 import (
 	"context"
+	"crypto/subtle"
+	"encoding/json"
 	"io"
+	"kiro-go/config"
 	"kiro-go/logger"
 	"net/http"
 	"runtime/debug"
@@ -137,17 +140,61 @@ func requestIDMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// metricsRouter serves /metrics (Prometheus text exposition) without forwarding
-// to the inner handler. Everything else passes through.
+// metricsRouter serves /metrics (Prometheus text exposition) and /debug/audit-log
+// without forwarding to the inner handler. Everything else passes through.
 func metricsRouter(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/metrics" {
+		switch r.URL.Path {
+		case "/metrics":
 			w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 			_, _ = io.WriteString(w, globalMetrics.Render())
+			return
+		case "/debug/audit-log":
+			serveAuditLog(w, r)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// adminPasswordOK guards the audit-log endpoint with the admin password
+// (header X-Admin-Password or ?password=), compared in constant time so a
+// network observer cannot time-attack the password. Empty configured password
+// fails closed.
+func adminPasswordOK(r *http.Request) bool {
+	pw := config.GetPassword()
+	if pw == "" {
+		return false
+	}
+	got := r.Header.Get("X-Admin-Password")
+	if got == "" {
+		got = r.URL.Query().Get("password")
+	}
+	return subtle.ConstantTimeCompare([]byte(got), []byte(pw)) == 1
+}
+
+// serveAuditLog exposes recent structured audit entries as JSON for the admin
+// UI's error/access-log view. Read-only; requires the admin password.
+func serveAuditLog(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if !adminPasswordOK(r) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"type":"error","error":{"type":"authentication_error","message":"admin password required"}}`)
+		return
+	}
+	limit := 100
+	if v := strings.TrimSpace(r.URL.Query().Get("limit")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	entries, err := AuditRecent(limit)
+	if err != nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, `{"type":"error","error":{"type":"api_error","message":"audit log unavailable"}}`)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{"count": len(entries), "entries": entries})
 }
 
 // securityHeadersMiddleware sets baseline browser-security headers (admin panel
@@ -178,6 +225,21 @@ func instrumentMiddleware(next http.Handler) http.Handler {
 		lat := time.Since(start)
 		metricsDuration(lat)
 		metricsRequest(r.Method, strconv.Itoa(rec.status), pathClass(r.URL.Path))
+		// Audit: one structured entry per request (request id, SHA-256 of the
+		// provided API key, method, path, status, latency, response size). Async
+		// + non-blocking (recordAudit drops on a full buffer and counts it). The
+		// API key is hashed, never stored, so the audit log is safe to expose via
+		// /debug/audit-log to an authenticated admin.
+		recordAudit(AuditEntry{
+			RequestID:  requestIDFromContext(r.Context()),
+			TimeUnixMs: start.UnixMilli(),
+			APIKeyHash: hashAPIKey(extractProvidedKey(r)),
+			Method:     r.Method,
+			Path:       r.URL.Path,
+			Status:     rec.status,
+			LatencyMs:  lat.Milliseconds(),
+			Bytes:      rec.bytes,
+		})
 	})
 }
 
