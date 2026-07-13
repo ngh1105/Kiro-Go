@@ -115,7 +115,7 @@ func (h *Handler) ImportApiKeys(rawText, region, authRegion, apiRegion string) A
 		// Async model-cache refresh (non-blocking).
 		go func(acc config.Account) {
 			if err := h.fetchAndCacheAccountModels(&acc); err != nil {
-				logger.Warnf("[ModelsCache] Auto-refresh failed for api_key account %s: %v", acc.Email, err)
+				logger.Warnf("[ModelsCache] Auto-refresh failed for api_key account %s: %v", accountEmailForLog(&acc), err)
 			}
 		}(account)
 		summary.Results = append(summary.Results, result)

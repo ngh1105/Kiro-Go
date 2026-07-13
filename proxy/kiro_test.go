@@ -305,3 +305,20 @@ func TestCallKiroAPIRebuildsRegionForApiKeyAccount(t *testing.T) {
 		t.Fatalf("api_key host: want q.eu-central-1.amazonaws.com, got %q", gotHost)
 	}
 }
+
+// TestAccountEmailForLogMasksApiKey ensures api_key accounts (which have no email
+// until their first successful refresh) are not blind in logs: fall back to the masked
+// key. When an email is present it wins.
+func TestAccountEmailForLogMasksApiKey(t *testing.T) {
+	acct := &config.Account{AuthMethod: "api_key", KiroApiKey: "ksk_abcdefghijklmnop"}
+	if got := accountEmailForLog(acct); got != "ksk_ab…mnop" {
+		t.Fatalf("api_key no-email: want masked key %q, got %q", "ksk_ab…mnop", got)
+	}
+	acct.Email = "user@example.com"
+	if got := accountEmailForLog(acct); got != "user@example.com" {
+		t.Fatalf("email present: want %q, got %q", "user@example.com", got)
+	}
+	if got := accountEmailForLog(nil); got != "<nil>" {
+		t.Fatalf("nil account: want %q, got %q", "<nil>", got)
+	}
+}

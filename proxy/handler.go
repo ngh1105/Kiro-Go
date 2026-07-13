@@ -2638,7 +2638,7 @@ func (h *Handler) apiAddAccount(w http.ResponseWriter, r *http.Request) {
 	if account.Enabled && (account.AccessToken != "" || account.IsApiKeyCredential()) {
 		go func(acc config.Account) {
 			if err := h.fetchAndCacheAccountModels(&acc); err != nil {
-				logger.Warnf("[ModelsCache] Auto-refresh failed for new account %s: %v", acc.Email, err)
+				logger.Warnf("[ModelsCache] Auto-refresh failed for new account %s: %v", accountEmailForLog(&acc), err)
 			}
 		}(account)
 	}
@@ -2707,7 +2707,7 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 	if !oldEnabled && existing.Enabled && existing.AccessToken != "" {
 		go func(acc config.Account) {
 			if err := h.fetchAndCacheAccountModels(&acc); err != nil {
-				logger.Warnf("[ModelsCache] Auto-refresh failed for re-enabled account %s: %v", acc.Email, err)
+				logger.Warnf("[ModelsCache] Auto-refresh failed for re-enabled account %s: %v", accountEmailForLog(&acc), err)
 			}
 		}(*existing)
 	}
@@ -3387,12 +3387,12 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		// applyKiroBaseHeaders; profile-ARN resolution is skipped for api_key.
 		go func(acc config.Account) {
 			if _, infoErr := RefreshAccountInfo(&acc); infoErr != nil {
-				logger.Warnf("[Import] RefreshAccountInfo failed for api_key account %s: %v", acc.Email, infoErr)
+				logger.Warnf("[Import] RefreshAccountInfo failed for api_key account %s: %v", accountEmailForLog(&acc), infoErr)
 			}
 		}(account)
 		go func(acc config.Account) {
 			if err := h.fetchAndCacheAccountModels(&acc); err != nil {
-				logger.Warnf("[ModelsCache] Auto-refresh failed for api_key account %s: %v", acc.Email, err)
+				logger.Warnf("[ModelsCache] Auto-refresh failed for api_key account %s: %v", accountEmailForLog(&acc), err)
 			}
 		}(account)
 		json.NewEncoder(w).Encode(map[string]interface{}{
