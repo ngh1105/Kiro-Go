@@ -2610,6 +2610,21 @@ func (h *Handler) apiAddAccount(w http.ResponseWriter, r *http.Request) {
 		account.Region = "us-east-1"
 	}
 
+	// api_key: use the Kiro API key directly as the bearer (tokentype: API_KEY).
+	// Mirror it into AccessToken for pool/dispatch/metrics compatibility, zero
+	// ExpiresAt + RefreshToken so no refresh path ever fires.
+	if account.IsApiKeyCredential() {
+		if account.KiroApiKey == "" {
+			w.WriteHeader(400)
+			json.NewEncoder(w).Encode(map[string]string{"error": "kiroApiKey is required for api_key accounts"})
+			return
+		}
+		account.AuthMethod = "api_key"
+		account.AccessToken = account.KiroApiKey
+		account.RefreshToken = ""
+		account.ExpiresAt = 0
+	}
+
 	if err := config.AddAccount(account); err != nil {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
@@ -2618,7 +2633,7 @@ func (h *Handler) apiAddAccount(w http.ResponseWriter, r *http.Request) {
 
 	h.pool.Reload()
 	// 新账号若已启用且有 token，立即拉取并缓存模型列表
-	if account.Enabled && account.AccessToken != "" {
+	if account.Enabled && (account.AccessToken != "" || account.IsApiKeyCredential()) {
 		go func(acc config.Account) {
 			if err := h.fetchAndCacheAccountModels(&acc); err != nil {
 				logger.Warnf("[ModelsCache] Auto-refresh failed for new account %s: %v", acc.Email, err)
@@ -3566,11 +3581,12 @@ func (h *Handler) apiGetStatus(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) apiGetSettings(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"apiKey":         config.GetApiKey(),
-		"requireApiKey":  config.IsApiKeyRequired(),
-		"port":           config.GetPort(),
-		"host":           config.GetHost(),
-		"allowOverUsage": config.GetAllowOverUsage(),
+		"apiKey":          config.GetApiKey(),
+		"requireApiKey":   config.IsApiKeyRequired(),
+		"port":            config.GetPort(),
+		"host":            config.GetHost(),
+		"allowOverUsage":  config.GetAllowOverUsage(),
+		"maxPayloadBytes": config.GetMaxPayloadBytes(),
 	})
 }
 
@@ -3619,10 +3635,11 @@ func (h *Handler) apiUpdatePromptFilter(w http.ResponseWriter, r *http.Request) 
 
 func (h *Handler) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ApiKey         *string `json:"apiKey,omitempty"`
-		RequireApiKey  *bool   `json:"requireApiKey,omitempty"`
-		Password       string  `json:"password,omitempty"`
-		AllowOverUsage *bool   `json:"allowOverUsage,omitempty"`
+		ApiKey          *string `json:"apiKey,omitempty"`
+		RequireApiKey   *bool   `json:"requireApiKey,omitempty"`
+		Password        string  `json:"password,omitempty"`
+		AllowOverUsage  *bool   `json:"allowOverUsage,omitempty"`
+		MaxPayloadBytes *int    `json:"maxPayloadBytes,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -3645,6 +3662,14 @@ func (h *Handler) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		// Rebuild the pool so over-quota accounts are re-included or dropped immediately.
 		h.pool.Reload()
+	}
+
+	if req.MaxPayloadBytes != nil {
+		if err := config.UpdateMaxPayloadBytes(*req.MaxPayloadBytes); err != nil {
+			w.WriteHeader(500)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
 	}
 
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
