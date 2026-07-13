@@ -260,6 +260,11 @@ func ResolveProfileArn(account *config.Account) (string, error) {
 	if account == nil {
 		return "", fmt.Errorf("account is nil")
 	}
+	// api_key accounts authenticate directly (tokentype: API_KEY) and have no
+	// profile ARN. Skip the ListAvailableProfiles probe entirely.
+	if account.IsApiKeyCredential() {
+		return "", nil
+	}
 	if profileArn := strings.TrimSpace(account.ProfileArn); profileArn != "" {
 		return profileArn, nil
 	}

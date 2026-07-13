@@ -118,6 +118,28 @@ func TestResolveProfileArnFetchesAndCachesProfile(t *testing.T) {
 	}
 }
 
+// TestResolveProfileArnSkipsApiKeyAccount asserts an api_key account returns
+// an empty profile ARN without any HTTP probe (the key authenticates directly).
+func TestResolveProfileArnSkipsApiKeyAccount(t *testing.T) {
+	// If a request were made, this round-tripper fails the test.
+	kiroRestHttpStore.Store(&http.Client{
+		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			t.Fatal("unexpected HTTP request for api_key account profile ARN")
+			return nil, nil
+		}),
+	})
+	t.Cleanup(func() { InitKiroHttpClient("") })
+
+	account := &config.Account{AuthMethod: "api_key", KiroApiKey: "key-abc", AccessToken: "key-abc"}
+	got, err := ResolveProfileArn(account)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "" {
+		t.Fatalf("expected empty profile ARN for api_key account, got %q", got)
+	}
+}
+
 func TestResolveProfileArnSuppressesBuilderIDUnsupportedLookup(t *testing.T) {
 	clearProfileArnResolutionCooldowns()
 	t.Cleanup(clearProfileArnResolutionCooldowns)
