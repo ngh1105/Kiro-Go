@@ -165,27 +165,56 @@ func TestWriteFileAtomicPersistsAndLeavesNoTemp(t *testing.T) {
 	}
 }
 
-// TestBuildClaudeProfileReturnsNilWithoutCacheControl is the regression guard for
-// the has_cache_control fast path: a request with no cache_control marker yields
-// a nil profile — identical to the full flatten/hash pass, but without the
-// O(prompt) work. A request carrying cache_control still builds a profile.
-func TestBuildClaudeProfileReturnsNilWithoutCacheControl(t *testing.T) {
+// TestBuildClaudeProfileAutoPrefixWithoutCacheControl locks the auto-prefix
+// behavior (mirrors Rust prefix_chain_works_without_any_cache_control): a
+// request with NO cache_control marker still builds a profile and — across two
+// turns sharing a stable history prefix — the second turn reads cache
+// (cache_read > 0). This reproduces Anthropic's automatic prompt caching, where
+// stable prefixes are reused across turns without the client marking
+// cache_control. A request carrying cache_control still builds a profile.
+func TestBuildClaudeProfileAutoPrefixWithoutCacheControl(t *testing.T) {
 	tr := newPromptCacheTracker(time.Hour)
+	body := strings.Repeat("lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore ", 80)
 
-	// No cache_control anywhere: plain string system + string message content.
-	plain := &ClaudeRequest{
-		Model:    "claude-sonnet-4.5",
-		System:   strings.Repeat("system prompt without cache marker ", 200),
-		Messages: []ClaudeMessage{{Role: "user", Content: strings.Repeat("plain user text ", 200)}},
+	mk := func(final string) *ClaudeRequest {
+		return &ClaudeRequest{
+			Model:    "claude-sonnet-4.5",
+			System:   strings.Repeat("system prompt without any cache marker ", 200),
+			Messages: []ClaudeMessage{
+				{Role: "user", Content: body},
+				{Role: "assistant", Content: body},
+				{Role: "user", Content: final},
+			},
+		}
 	}
+
+	// No cache_control anywhere — predicate confirms it, yet a profile is built.
+	plain := mk("question one")
 	if claudeRequestHasCacheControl(plain) {
 		t.Fatal("claudeRequestHasCacheControl should be false for a request with no cache_control")
 	}
-	if prof := tr.BuildClaudeProfile(plain, 5000); prof != nil {
-		t.Fatalf("expected nil profile when no cache_control present, got %+v", prof)
+	p1 := tr.BuildClaudeProfile(plain, 5000)
+	if p1 == nil {
+		t.Fatal("auto-prefix: expected a profile even when no cache_control is present")
+	}
+	first := tr.Compute("acct-1", p1)
+	if first.CacheReadInputTokens != 0 {
+		t.Fatalf("first turn has no prior cache to read, got %+v", first)
+	}
+	tr.Update("acct-1", p1)
+
+	// Turn 2: identical history prefix, new final message, still no cache_control.
+	// The shared prefix must hit — auto-prefix cache, no explicit marker needed.
+	p2 := tr.BuildClaudeProfile(mk("question two"), 5000)
+	if p2 == nil {
+		t.Fatal("auto-prefix: turn-2 profile should be built")
+	}
+	second := tr.Compute("acct-1", p2)
+	if second.CacheReadInputTokens == 0 {
+		t.Fatalf("auto-prefix: expected cross-turn cache_read without cache_control, got %+v", second)
 	}
 
-	// cache_control on the system block: profile is built (above min-token threshold).
+	// A request WITH cache_control still builds a profile (unchanged path).
 	withCache := &ClaudeRequest{
 		Model: "claude-sonnet-4.5",
 		System: []interface{}{

@@ -276,17 +276,37 @@ func claudeRequestHasCacheControl(req *ClaudeRequest) bool {
 	return false
 }
 
-func (t *promptCacheTracker) BuildClaudeProfile(req *ClaudeRequest, totalInputTokens int) *promptCacheProfile {
-	// Fast path: if no block carries cache_control, no breakpoint can be
-	// produced — explicit breakpoints need TTL > 0, and implicit message-end
-	// breakpoints only fire once an explicit one has set activeTTL > 0. So a
-	// request with zero cache_control markers yields zero breakpoints and a nil
-	// profile. Skipping the flatten/canonicalize/hash work avoids O(prompt) work
-	// for non-Claude-Code clients that send large prompts without cache_control.
-	// Outcome-identical to the full pass (returns nil iff the pass produces none).
-	if !claudeRequestHasCacheControl(req) {
-		return nil
+// detectMaxTTL returns the largest cache_control TTL present anywhere in the
+// request (1h wins over 5m), defaulting to defaultPromptCacheTTL when no
+// cache_control marker exists. Mirrors Rust detect_max_ttl: it seeds the
+// auto-prefix activeTTL so a request WITHOUT explicit cache_control still
+// produces message-end breakpoints at the default TTL — reproducing Anthropic's
+// automatic prompt caching (a stable history prefix hits across turns even
+// though the client never set cache_control). ClaudeTool is a typed struct with
+// no cache_control field, so only system/message blocks can contribute.
+func detectMaxTTL(req *ClaudeRequest) time.Duration {
+	max := defaultPromptCacheTTL
+	bump := func(value interface{}) {
+		if normalized := normalizePromptCacheTTL(extractPromptCacheTTL(value)); normalized > max {
+			max = normalized
+		}
 	}
+	if arr, ok := req.System.([]interface{}); ok {
+		for _, block := range arr {
+			bump(block)
+		}
+	}
+	for _, msg := range req.Messages {
+		if arr, ok := msg.Content.([]interface{}); ok {
+			for _, block := range arr {
+				bump(block)
+			}
+		}
+	}
+	return max
+}
+
+func (t *promptCacheTracker) BuildClaudeProfile(req *ClaudeRequest, totalInputTokens int) *promptCacheProfile {
 	blocks := flattenClaudeCacheBlocks(req)
 	if len(blocks) == 0 {
 		return nil
@@ -295,7 +315,9 @@ func (t *promptCacheTracker) BuildClaudeProfile(req *ClaudeRequest, totalInputTo
 	hasher := sha256.New()
 	breakpoints := make([]promptCacheBreakpoint, 0)
 	cumulativeTokens := 0
-	var activeTTL time.Duration
+	// Auto-prefix: seed activeTTL with detectMaxTTL(req) so message-end
+	// breakpoints fire even with no explicit cache_control (see detectMaxTTL).
+	activeTTL := detectMaxTTL(req)
 
 	for _, block := range blocks {
 		canonical := canonicalizeCacheValue(block.Value)
@@ -616,11 +638,32 @@ func appendSystemCacheBlocks(blocks *[]cacheablePromptBlock, system interface{})
 			},
 		}, false)
 	case []interface{}:
+		// Structural skip (mirrors Rust extract_segments): Claude Code injects a
+		// per-turn DYNAMIC block at system[0] WITHOUT cache_control, followed by
+		// the stable cached block(s). Fingerprinting from that volatile head would
+		// drift every downstream prefix fingerprint across turns, collapsing
+		// cross-turn cache hits to zero. So skip every leading system block that
+		// lacks cache_control — accumulate from the first block carrying one. If
+		// no block has cache_control, skipUntil stays 0 (include all, matching
+		// Rust's unwrap_or(0)). system_index is a stripped position key, so the
+		// shift in index values does not affect fingerprints. The
+		// isAnthropicBillingHeaderBlock drop inside appendPromptBlock stays as a
+		// backstop for a non-leading billing-header block.
+		skipUntil := 0
+		found := false
 		for i, block := range v {
+			if interfaceHasCacheControl(block) {
+				skipUntil = i
+				found = true
+				break
+			}
+		}
+		_ = found
+		for i := skipUntil; i < len(v); i++ {
 			appendPromptBlock(blocks, map[string]interface{}{
 				"kind":         "system",
 				"system_index": i,
-				"block":        block,
+				"block":        v[i],
 			}, false)
 		}
 	case []string:

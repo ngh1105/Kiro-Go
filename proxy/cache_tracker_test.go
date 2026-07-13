@@ -168,6 +168,71 @@ func TestPromptCacheStableWhenBillingHeaderAppearsOrDisappears(t *testing.T) {
 	}
 }
 
+// TestPromptCacheStructuralSkipOfLeadingDynamicSystemBlock generalizes the two
+// billing-header guards above: Claude Code injects a per-turn DYNAMIC block at
+// system[0] WITHOUT cache_control, followed by the stable cached block(s).
+// Fingerprinting from that volatile head would drift every downstream prefix
+// fingerprint across turns, collapsing cross-turn cache hits to zero. The
+// tracker must STRUCTURALLY skip every leading system block that lacks
+// cache_control (mirrors Rust extract_segments), not just the literal
+// x-anthropic-billing-header string the legacy matcher recognizes. So this must
+// hold even when the dynamic header is an arbitrary changing string.
+func TestPromptCacheStructuralSkipOfLeadingDynamicSystemBlock(t *testing.T) {
+	tracker := newPromptCacheTracker(time.Hour)
+	stableSys := strings.Repeat("You are a careful senior engineer who reviews diffs critically and writes idiomatic Go. ", 80)
+	body := strings.Repeat("implement the feature step by step with tests and clear rationale. ", 60)
+
+	build := func(dynamicHeader string, msgs []ClaudeMessage) *ClaudeRequest {
+		return &ClaudeRequest{
+			Model: "claude-sonnet-4.5",
+			System: []interface{}{
+				// sys[0]: per-turn dynamic marker, NO cache_control (not a billing string).
+				map[string]interface{}{"type": "text", "text": dynamicHeader},
+				// sys[1]: stable cached block.
+				map[string]interface{}{
+					"type":          "text",
+					"text":          stableSys,
+					"cache_control": map[string]interface{}{"type": "ephemeral"},
+				},
+			},
+			Messages: msgs,
+		}
+	}
+
+	turn1 := build("now=1001", []ClaudeMessage{
+		{Role: "user", Content: body},
+		{Role: "assistant", Content: body},
+		{Role: "user", Content: body},
+	})
+	profile1 := tracker.BuildClaudeProfile(turn1, 8192)
+	if profile1 == nil {
+		t.Fatalf("profile1 should be built")
+	}
+	first := tracker.Compute("acct-1", profile1)
+	if first.CacheReadInputTokens != 0 {
+		t.Fatalf("turn1 has no prior cache to read, got %+v", first)
+	}
+	tracker.Update("acct-1", profile1)
+
+	// Turn 2: dynamic header changed to "now=2002"; one more a/u pair appended.
+	// After skipping the volatile head, sys[1]+history prefix is byte-identical → must hit.
+	turn2 := build("now=2002", []ClaudeMessage{
+		{Role: "user", Content: body},
+		{Role: "assistant", Content: body},
+		{Role: "user", Content: body},
+		{Role: "assistant", Content: body},
+		{Role: "user", Content: body},
+	})
+	profile2 := tracker.BuildClaudeProfile(turn2, 8192)
+	if profile2 == nil {
+		t.Fatalf("profile2 should be built")
+	}
+	second := tracker.Compute("acct-1", profile2)
+	if second.CacheReadInputTokens == 0 {
+		t.Fatalf("structural skip: dynamic system header change must not break cross-turn cache hit, got %+v", second)
+	}
+}
+
 func TestCanonicalCacheValueIgnoresPositionKeys(t *testing.T) {
 	first := canonicalizeCacheValue(stripCachePositionKeys(map[string]interface{}{
 		"kind":         "system",
