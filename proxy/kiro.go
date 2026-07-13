@@ -340,8 +340,23 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 		// Update the origin field for the selected endpoint.
 		payload.ConversationState.CurrentMessage.UserInputMessage.Origin = ep.Origin
 
-		// Target the profile's data-plane region; endpoint URLs are declared for us-east-1.
-		epURL := regionalizeURLForProfile(ep.URL, account, payload.ProfileArn)
+		// Target the data-plane region. api_key accounts have no profile ARN, so
+		// rebuild the host from the account's EffectiveApiRegion; OAuth accounts
+		// keep deriving the region from the profile ARN.
+		epURL := ep.URL
+		if account != nil && account.IsApiKeyCredential() {
+			if parsed, perr := url.Parse(ep.URL); perr == nil && strings.HasSuffix(parsed.Hostname(), ".amazonaws.com") {
+				apiRegion := account.EffectiveApiRegion()
+				switch ep.Name {
+				case "CodeWhisperer":
+					epURL = fmt.Sprintf("https://codewhisperer.%s.amazonaws.com/generateAssistantResponse", apiRegion)
+				default: // "Kiro IDE" and "AmazonQ"
+					epURL = fmt.Sprintf("https://q.%s.amazonaws.com/generateAssistantResponse", apiRegion)
+				}
+			}
+		} else {
+			epURL = regionalizeURLForProfile(ep.URL, account, payload.ProfileArn)
+		}
 
 		reqBody, _ := json.Marshal(payload)
 		req, err := http.NewRequest("POST", epURL, bytes.NewReader(reqBody))

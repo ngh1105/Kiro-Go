@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"io"
 	"kiro-go/config"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 )
@@ -268,4 +270,38 @@ func awsEventStreamFrame(t *testing.T, eventType string, payload map[string]inte
 	frame = append(frame, payloadBytes...)
 	frame = append(frame, 0, 0, 0, 0)
 	return frame
+}
+
+// TestCallKiroAPIRebuildsRegionForApiKeyAccount asserts an api_key account's
+// endpoint host is rebuilt from EffectiveApiRegion (q.<region> for non-us-east-1
+// endpoints), since it has no profile ARN to derive the region from.
+func TestCallKiroAPIRebuildsRegionForApiKeyAccount(t *testing.T) {
+	if err := config.Init(t.TempDir() + "/config.json"); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	var gotHost string
+	// CallKiroAPI uses the streaming store (kiroHttpStore), not the REST store.
+	kiroHttpStore.Store(&http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			gotHost = req.URL.Host
+			return &http.Response{
+				StatusCode: 200,
+				Body:       io.NopCloser(strings.NewReader("")),
+				Header:     make(http.Header),
+			}, nil
+		}),
+	})
+	t.Cleanup(func() { InitKiroHttpClient("") })
+
+	apiKeyAcct := &config.Account{
+		AuthMethod:  "api_key",
+		KiroApiKey:  "k",
+		AccessToken: "k",
+		ApiRegion:   "eu-central-1",
+	}
+	payload := &KiroPayload{}
+	_ = CallKiroAPI(apiKeyAcct, payload, nil)
+	if gotHost != "q.eu-central-1.amazonaws.com" {
+		t.Fatalf("api_key host: want q.eu-central-1.amazonaws.com, got %q", gotHost)
+	}
 }
