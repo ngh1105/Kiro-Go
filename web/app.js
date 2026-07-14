@@ -719,6 +719,31 @@
     }
   }
 
+  // tokensCell renders the in / out / cache breakdown for one log row. The legacy
+  // single `tokens` total is split so each request shows prompt-in, completion-out,
+  // and (Claude paths) prompt-cache read/write. Shows '-' when nothing was billed.
+  function tokensCell(l) {
+    const inT = l.inputTokens || 0;
+    const outT = l.outputTokens || 0;
+    const cacheRead = l.cacheRead || 0;
+    const cacheCreate = l.cacheCreation || 0;
+    if (!inT && !outT && !cacheRead && !cacheCreate) {
+      return '<span class="text-muted">-</span>';
+    }
+    const lab = s => '<b style="opacity:0.6;font-weight:500;">' + escapeHtml(s) + '</b>';
+    let html = '<div style="line-height:1.35;white-space:nowrap;">' +
+      '<span>' + lab(t('logs.input')) + ' ' + formatNum(inT) + '</span> ' +
+      '<span style="margin-left:6px;">' + lab(t('logs.output')) + ' ' + formatNum(outT) + '</span>';
+    if (cacheRead || cacheCreate) {
+      html += '<div style="font-size:0.72rem;opacity:0.7;">' +
+        '<span>' + lab(t('logs.cacheRead')) + ' ' + formatNum(cacheRead) + '</span> ' +
+        '<span style="margin-left:6px;">' + lab(t('logs.cacheCreation')) + ' ' + formatNum(cacheCreate) + '</span>' +
+        '</div>';
+    }
+    html += '</div>';
+    return html;
+  }
+
   function renderLogs(logs) {
     logsCache = logs;
     const list = $('logsList');
@@ -768,7 +793,7 @@
         '<td>' + escapeHtml(l.endpoint) + '</td>' +
         '<td>' + escapeHtml(l.model || '-') + '</td>' +
         '<td>' + escapeHtml(accountLabel(l.accountId)) + '</td>' +
-        '<td>' + (l.tokens ? formatNum(l.tokens) : '-') + '</td>' +
+        '<td>' + tokensCell(l) + '</td>' +
         '<td>' + (l.duration ? (l.duration + 'ms') : '-') + '</td>' +
         '<td>' + detailCell + '</td>' +
         '</tr>';
