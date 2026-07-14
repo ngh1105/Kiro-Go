@@ -2345,7 +2345,28 @@
           };
         });
       } else {
-        items = Array.isArray(json) ? json : [json];
+        const arr = Array.isArray(json) ? json : [json];
+        // Normalize CLIProxyAPI entries (snake_case) and bare blobs onto the
+        // camelCase shape the rest of this function expects. Without this, a
+        // CLIProxyAPI array (refresh_token/client_id/...) fails the
+        // `if (!item.refreshToken)` skip below and never reaches the server.
+        items = arr.map(e => ({
+          refreshToken: e.refreshToken || e.refresh_token,
+          accessToken: e.accessToken || e.access_token,
+          clientId: e.clientId || e.client_id,
+          clientSecret: e.clientSecret || e.client_secret,
+          authMethod: e.authMethod || e.auth_method,
+          region: e.region,
+          provider: e.provider || e.idp,
+          tokenEndpoint: e.tokenEndpoint,
+          issuerUrl: e.issuerUrl,
+          scopes: e.scopes,
+          id: e.id,
+          email: e.email,
+          profileArn: e.profileArn || e.profile_arn,
+          userId: e.userId || e.user_id,
+          startUrl: e.startUrl || e.start_url
+        }));
       }
     } catch {
       const parsed = parseLineCredentials(raw);

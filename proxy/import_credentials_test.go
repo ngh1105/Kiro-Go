@@ -125,6 +125,44 @@ func TestApiImportCredentialsDedupsByRefreshToken(t *testing.T) {
 	}
 }
 
+func TestApiImportCredentialsAcceptsCLIProxyAPIKiroArray(t *testing.T) {
+	cfgFile := t.TempDir() + "/config.json"
+	if err := config.Init(cfgFile); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	defer installCleanAuthClient(t)()
+
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"accessToken":"at-new","refreshToken":"rt-rotated","expiresIn":3600,"profileArn":"arn:aws:codewhisperer:profile/test"}`)
+	}))
+	defer fake.Close()
+
+	oldOIDC := authOidcURL()
+	auth.SetOIDCTokenURLForTest(func(string) string { return fake.URL })
+	defer auth.SetOIDCTokenURLForTest(oldOIDC)
+
+	h := &Handler{pool: accountpool.GetPool()}
+	body := `[{"type":"kiro","access_token":"at-old","refresh_token":"rt-cli","expires_in":3600,"expires_at":"2026-07-13T15:19:53.000Z","profile_arn":"","client_id":"cli-client","client_secret":"cli-secret","region":"eu-central-1","auth_method":"idc","start_url":"https://ssoins.example.portal.eu-central-1.app.aws","email":"user@example.com"}]`
+	rec := httptest.NewRecorder()
+	h.apiImportCredentials(rec, httptest.NewRequest("POST", "/auth/credentials", strings.NewReader(body)))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for CLIProxyAPI array import, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	accs := config.GetAccounts()
+	if len(accs) != 1 {
+		t.Fatalf("expected 1 account persisted, got %d", len(accs))
+	}
+	got := accs[0]
+	if got.ClientID != "cli-client" || got.ClientSecret != "cli-secret" || got.RefreshToken != "rt-rotated" {
+		t.Fatalf("CLIProxyAPI fields not imported: got clientID=%q clientSecret=%q refreshToken=%q", got.ClientID, got.ClientSecret, got.RefreshToken)
+	}
+	if got.Region != "eu-central-1" || got.AuthMethod != "idc" || got.Email != "user@example.com" {
+		t.Fatalf("CLIProxyAPI metadata not imported: region=%q authMethod=%q email=%q", got.Region, got.AuthMethod, got.Email)
+	}
+}
+
 func TestApiImportCredentialsUsesUpstreamExpiresAt(t *testing.T) {
 	cfgFile := t.TempDir() + "/config.json"
 	if err := config.Init(cfgFile); err != nil {
@@ -188,12 +226,12 @@ func authOidcURL() func(string) string { return auth.GetOIDCTokenURLForTest() }
 // clientSecret, so the old default branch misclassified them as "social".
 func TestNormalizeImportAuthMethod(t *testing.T) {
 	cases := []struct {
-		name           string
-		authMethod     string
-		clientID       string
-		clientSecret   string
-		tokenEndpoint  string
-		want           string
+		name          string
+		authMethod    string
+		clientID      string
+		clientSecret  string
+		tokenEndpoint string
+		want          string
 	}{
 		{"explicit external_idp", "external_idp", "c", "", "https://login.microsoftonline.com/t/oauth2/v2.0/token", "external_idp"},
 		{"azure alias", "AzureAD", "c", "", "https://login.microsoftonline.com/t/oauth2/v2.0/token", "external_idp"},

@@ -3309,38 +3309,110 @@ func (h *Handler) apiImportSsoToken(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+type credentialImportRequest struct {
+	AccessToken  string `json:"accessToken"`
+	RefreshToken string `json:"refreshToken"`
+	ClientID     string `json:"clientId"`
+	ClientSecret string `json:"clientSecret"`
+	AuthMethod   string `json:"authMethod"`
+	Provider     string `json:"provider"`
+	Region       string `json:"region"`
+	// external_idp (enterprise SSO / Azure AD) refresh material.
+	TokenEndpoint string `json:"tokenEndpoint"`
+	IssuerURL     string `json:"issuerUrl"`
+	Scopes        string `json:"scopes"`
+	// api_key credential: Kiro API key used directly as bearer (no OAuth refresh).
+	KiroApiKey string `json:"kiroApiKey"`
+	AuthRegion string `json:"authRegion"`
+	ApiRegion  string `json:"apiRegion"`
+	// Optional identity preservation when pasting a full account record.
+	ID         string `json:"id"`
+	Email      string `json:"email"`
+	Nickname   string `json:"nickname"`
+	ProfileArn string `json:"profileArn"`
+	// userId (account-level in Kiro Account Manager exports) embeds the Azure
+	// tenant, from which tokenEndpoint/issuerUrl/scopes are derived when missing.
+	UserID string `json:"userId"`
+}
+
+func decodeCredentialImportRequest(r io.Reader) (credentialImportRequest, error) {
+	var raw json.RawMessage
+	if err := json.NewDecoder(r).Decode(&raw); err != nil {
+		return credentialImportRequest{}, err
+	}
+	var req credentialImportRequest
+	if len(raw) > 0 && raw[0] == '[' {
+		var entries []struct {
+			credentialImportRequest
+			Type         string `json:"type"`
+			AccessToken  string `json:"access_token"`
+			RefreshToken string `json:"refresh_token"`
+			ClientID     string `json:"client_id"`
+			ClientSecret string `json:"client_secret"`
+			AuthMethod   string `json:"auth_method"`
+			KiroApiKey   string `json:"kiro_api_key"`
+			AuthRegion   string `json:"auth_region"`
+			ApiRegion    string `json:"api_region"`
+			ProfileArn   string `json:"profile_arn"`
+			StartURL     string `json:"start_url"`
+			UserID       string `json:"user_id"`
+		}
+		if err := json.Unmarshal(raw, &entries); err != nil {
+			return credentialImportRequest{}, err
+		}
+		for _, entry := range entries {
+			if entry.Type != "" && !strings.EqualFold(entry.Type, "kiro") {
+				continue
+			}
+			req = entry.credentialImportRequest
+			if req.AccessToken == "" {
+				req.AccessToken = entry.AccessToken
+			}
+			if req.RefreshToken == "" {
+				req.RefreshToken = entry.RefreshToken
+			}
+			if req.ClientID == "" {
+				req.ClientID = entry.ClientID
+			}
+			if req.ClientSecret == "" {
+				req.ClientSecret = entry.ClientSecret
+			}
+			if req.AuthMethod == "" {
+				req.AuthMethod = entry.AuthMethod
+			}
+			if req.KiroApiKey == "" {
+				req.KiroApiKey = entry.KiroApiKey
+			}
+			if req.AuthRegion == "" {
+				req.AuthRegion = entry.AuthRegion
+			}
+			if req.ApiRegion == "" {
+				req.ApiRegion = entry.ApiRegion
+			}
+			if req.ProfileArn == "" {
+				req.ProfileArn = entry.ProfileArn
+			}
+			if req.UserID == "" {
+				req.UserID = entry.UserID
+			}
+			return req, nil
+		}
+		return credentialImportRequest{}, fmt.Errorf("no kiro credential")
+	}
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return credentialImportRequest{}, err
+	}
+	return req, nil
+}
+
 func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 	// Cap the body: accessToken becomes attacker-influenced input that is base64- and
 	// JSON-decoded twice (issuerFromAccessTokenJWT / ExpFromAccessTokenJWT). Without a
 	// limit an oversized token is a memory-amplification DoS. Mirrors the io.LimitReader
 	// guard on outbound IdP responses in auth/kiro_sso.go's oidcDiscover.
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-	var req struct {
-		AccessToken  string `json:"accessToken"`
-		RefreshToken string `json:"refreshToken"`
-		ClientID     string `json:"clientId"`
-		ClientSecret string `json:"clientSecret"`
-		AuthMethod   string `json:"authMethod"`
-		Provider     string `json:"provider"`
-		Region       string `json:"region"`
-		// external_idp (enterprise SSO / Azure AD) refresh material.
-		TokenEndpoint string `json:"tokenEndpoint"`
-		IssuerURL     string `json:"issuerUrl"`
-		Scopes        string `json:"scopes"`
-		// api_key credential: Kiro API key used directly as bearer (no OAuth refresh).
-		KiroApiKey string `json:"kiroApiKey"`
-		AuthRegion string `json:"authRegion"`
-		ApiRegion  string `json:"apiRegion"`
-		// Optional identity preservation when pasting a full account record.
-		ID         string `json:"id"`
-		Email      string `json:"email"`
-		Nickname   string `json:"nickname"`
-		ProfileArn string `json:"profileArn"`
-		// userId (account-level in Kiro Account Manager exports) embeds the Azure
-		// tenant, from which tokenEndpoint/issuerUrl/scopes are derived when missing.
-		UserID string `json:"userId"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	req, err := decodeCredentialImportRequest(r.Body)
+	if err != nil {
 		w.WriteHeader(400)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
 		return
