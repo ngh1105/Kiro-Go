@@ -104,6 +104,20 @@ func TestApplyKiroBaseHeadersApiKeyBranch(t *testing.T) {
 		t.Fatalf("api_key tokentype: want API_KEY, got %q", got)
 	}
 
+	// api_key with KiroApiKey absent but the key mirrored into AccessToken only
+	// (non-canonical record: hand-edited or restored from a tool that omits
+	// kiroApiKey). IsApiKeyCredential() is true via the authMethod branch, so the
+	// bearer must still be sent — never dropped. Upstream rejects an empty
+	// Authorization header with HTTP 400 "Missing bearer token in the
+	// authorization header."
+	h = mk(&config.Account{AuthMethod: "api_key", KiroApiKey: "", AccessToken: "ksk-only-in-accesstoken"})
+	if got := h.Get("Authorization"); got != "Bearer ksk-only-in-accesstoken" {
+		t.Fatalf("api_key (kiroApiKey absent) bearer: want %q, got %q", "Bearer ksk-only-in-accesstoken", got)
+	}
+	if got := h.Get("tokentype"); got != "API_KEY" {
+		t.Fatalf("api_key (kiroApiKey absent) tokentype: want API_KEY, got %q", got)
+	}
+
 	// OAuth (idc): plain bearer, no tokentype header.
 	h = mk(&config.Account{AuthMethod: "idc", AccessToken: "at-oauth"})
 	if got := h.Get("Authorization"); got != "Bearer at-oauth" {

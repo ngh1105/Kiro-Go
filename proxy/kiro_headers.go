@@ -75,8 +75,19 @@ func buildKiroHeaderValues(account *config.Account, host, apiName, sdkVersion, m
 func applyKiroBaseHeaders(req *http.Request, account *config.Account, values kiroHeaderValues) {
 	if account != nil {
 		if account.IsApiKeyCredential() {
-			if account.KiroApiKey != "" {
-				req.Header.Set("Authorization", "Bearer "+account.KiroApiKey)
+			// The bearer is the Kiro API key. Every canonical import path mirrors
+			// the key into KiroApiKey, but a non-canonical record (hand-edited or
+			// restored from a tool that omits kiroApiKey) carries it only in
+			// AccessToken. Fall back to AccessToken so the bearer is always sent —
+			// without it upstream returns HTTP 400 "Missing bearer token in the
+			// authorization header." (this builder backs both the REST and the
+			// streaming/chat request paths).
+			key := account.KiroApiKey
+			if key == "" {
+				key = account.AccessToken
+			}
+			if key != "" {
+				req.Header.Set("Authorization", "Bearer "+key)
 				req.Header.Set("tokentype", "API_KEY")
 			}
 		} else if account.AccessToken != "" {
