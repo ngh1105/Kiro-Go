@@ -35,8 +35,10 @@ type RequestLog struct {
 	OutputTokens  int     `json:"outputTokens"`  // Completion tokens out (0 on failure)
 	CacheRead     int     `json:"cacheRead"`     // Prompt-cache read tokens (Claude paths only)
 	CacheCreation int     `json:"cacheCreation"` // Prompt-cache write tokens (Claude paths only)
-	Credits       float64 `json:"credits"`       // Credits consumed (0 on failure)
-	Duration      int64   `json:"duration"`      // Request duration in ms
+	Credits       float64 `json:"credits"`        // Credits consumed (0 on failure)
+	Duration      int64   `json:"duration"`       // Request duration in ms
+	ApiKeyID      string  `json:"apiKeyId,omitempty"`  // per-entry key id (the API key that routed the request)
+	ApiKeyName    string  `json:"apiKeyName,omitempty"` // resolved key name; populated at serialize time so renames stay current
 }
 
 const requestLogsMaxSize = 500
@@ -1296,7 +1298,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			if !messageStarted {
 				continue
 			}
-			h.recordFailureWithDetails("claude", model, account.ID, err)
+			h.recordFailureWithDetails(apiKeyID, "claude", model, account.ID, err)
 			emit("error", map[string]interface{}{
 				"type":  "error",
 				"error": map[string]string{"type": "api_error", "message": improperlyFormedClientMessage(err)},
@@ -1339,7 +1341,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		//   pool. Re-added verbatim when dispatch lands.
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 		h.promptCache.Update(account.ID, cacheProfile)
-		h.recordSuccessLog("claude", model, account.ID, inputTokens, outputTokens, cacheUsage.CacheReadInputTokens, cacheUsage.CacheCreationInputTokens, credits, time.Since(reqStart).Milliseconds())
+		h.recordSuccessLog(apiKeyID, "claude", model, account.ID, inputTokens, outputTokens, cacheUsage.CacheReadInputTokens, cacheUsage.CacheCreationInputTokens, credits, time.Since(reqStart).Milliseconds())
 		recordClaudeCacheDispatch("success", model, "stream", account, cacheUsage, inputTokens, outputTokens)
 
 		stopReason := "end_turn"
@@ -1366,7 +1368,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 	// 避免 sendClaudeError 的 WriteHeader+JSON 与心跳的 ': keepalive' 并发写同一个 w。
 	stopHeartbeat()
 	if lastErr != nil {
-		h.recordFailureWithDetails("claude", model, "", lastErr)
+		h.recordFailureWithDetails(apiKeyID, "claude", model, "", lastErr)
 	}
 	hbMu.Lock()
 	didCommit := committed
@@ -1473,7 +1475,7 @@ func (h *Handler) recordSuccessForApiKey(apiKeyID string, inputTokens, outputTok
 }
 
 // recordFailureWithDetails records a failure and stores it in the request logs.
-func (h *Handler) recordFailureWithDetails(endpoint, model, accountID string, err error) {
+func (h *Handler) recordFailureWithDetails(apiKeyID, endpoint, model, accountID string, err error) {
 	atomic.AddInt64(&h.totalRequests, 1)
 	atomic.AddInt64(&h.failedRequests, 1)
 
@@ -1492,6 +1494,7 @@ func (h *Handler) recordFailureWithDetails(endpoint, model, accountID string, er
 		Status:    "error",
 		Error:     errMsg,
 		ErrorType: errType,
+		ApiKeyID:  apiKeyID,
 	}
 
 	h.appendRequestLog(entry)
@@ -1501,7 +1504,7 @@ func (h *Handler) recordFailureWithDetails(endpoint, model, accountID string, er
 // and outputTokens are split (vs. the legacy Tokens total) so the Logs tab can
 // show in/out/cache per request. cacheRead/cacheCreation come from the prompt-
 // cache tracker (Claude paths only; OpenAI/Responses pass 0 — no cache there).
-func (h *Handler) recordSuccessLog(endpoint, model, accountID string, inputTokens, outputTokens, cacheRead, cacheCreation int, credits float64, durationMs int64) {
+func (h *Handler) recordSuccessLog(apiKeyID, endpoint, model, accountID string, inputTokens, outputTokens, cacheRead, cacheCreation int, credits float64, durationMs int64) {
 	entry := RequestLog{
 		Time:          time.Now().Unix(),
 		Endpoint:      endpoint,
@@ -1515,6 +1518,7 @@ func (h *Handler) recordSuccessLog(endpoint, model, accountID string, inputToken
 		CacheCreation: cacheCreation,
 		Credits:       credits,
 		Duration:      durationMs,
+		ApiKeyID:      apiKeyID,
 	}
 
 	h.appendRequestLog(entry)
@@ -1662,7 +1666,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		//   pool. Re-added verbatim when dispatch lands.
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 		h.promptCache.Update(account.ID, cacheProfile)
-		h.recordSuccessLog("claude", model, account.ID, inputTokens, outputTokens, cacheUsage.CacheReadInputTokens, cacheUsage.CacheCreationInputTokens, credits, time.Since(reqStart).Milliseconds())
+		h.recordSuccessLog(apiKeyID, "claude", model, account.ID, inputTokens, outputTokens, cacheUsage.CacheReadInputTokens, cacheUsage.CacheCreationInputTokens, credits, time.Since(reqStart).Milliseconds())
 		recordClaudeCacheDispatch("success", model, "nonstream", account, cacheUsage, inputTokens, outputTokens)
 
 		responseThinkingContent := rawThinkingContent
@@ -1703,7 +1707,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		return
 	}
 
-	h.recordFailureWithDetails("claude", model, "", lastErr)
+	h.recordFailureWithDetails(apiKeyID, "claude", model, "", lastErr)
 	h.sendClaudeError(w, 500, "api_error", improperlyFormedClientMessage(lastErr))
 }
 
@@ -2137,7 +2141,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 			if !responseStarted {
 				continue
 			}
-			h.recordFailureWithDetails("openai", model, account.ID, err)
+			h.recordFailureWithDetails(apiKeyID, "openai", model, account.ID, err)
 			return
 		}
 
@@ -2172,7 +2176,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 		//   branch off main. No-op here; stripped so handler compiles against main's
 		//   pool. Re-added verbatim when dispatch lands.
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
-		h.recordSuccessLog("openai", model, account.ID, inputTokens, outputTokens, 0, 0, credits, time.Since(reqStart).Milliseconds())
+		h.recordSuccessLog(apiKeyID, "openai", model, account.ID, inputTokens, outputTokens, 0, 0, credits, time.Since(reqStart).Milliseconds())
 
 		finishReason := "stop"
 		if len(toolCalls) > 0 {
@@ -2205,7 +2209,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 	// 避免 sendOpenAIError 的 WriteHeader+JSON 与心跳的 ': keepalive' 并发写同一个 w。
 	stopHeartbeat()
 	if lastErr != nil {
-		h.recordFailureWithDetails("openai", model, "", lastErr)
+		h.recordFailureWithDetails(apiKeyID, "openai", model, "", lastErr)
 	}
 	hbMu.Lock()
 	didCommit := committed
@@ -2322,7 +2326,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 		//   branch off main. No-op here; stripped so handler compiles against main's
 		//   pool. Re-added verbatim when dispatch lands.
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
-		h.recordSuccessLog("openai", model, account.ID, inputTokens, outputTokens, 0, 0, credits, time.Since(reqStart).Milliseconds())
+		h.recordSuccessLog(apiKeyID, "openai", model, account.ID, inputTokens, outputTokens, 0, 0, credits, time.Since(reqStart).Milliseconds())
 
 		thinkingFormat := config.GetThinkingConfig().OpenAIFormat
 		resp := KiroToOpenAIResponseWithReasoning(finalContent, reasoningContent, toolUses, inputTokens, outputTokens, model, thinkingFormat)
@@ -2336,7 +2340,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 		return
 	}
 
-	h.recordFailureWithDetails("openai", model, "", lastErr)
+	h.recordFailureWithDetails(apiKeyID, "openai", model, "", lastErr)
 	h.sendOpenAIError(w, 500, "server_error", improperlyFormedClientMessage(lastErr))
 }
 
@@ -3828,6 +3832,7 @@ func (h *Handler) apiGetStats(w http.ResponseWriter, r *http.Request) {
 		"failedRequests":  atomic.LoadInt64(&h.failedRequests),
 		"totalTokens":     atomic.LoadInt64(&h.totalTokens),
 		"totalCredits":    h.getCredits(),
+		"cacheWindows":    cacheMetricsSnapshotByWindows(time.Now()),
 		"uptime":          time.Now().Unix() - h.startTime,
 	})
 }
@@ -3845,8 +3850,24 @@ func (h *Handler) apiResetStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) apiGetLogs(w http.ResponseWriter, r *http.Request) {
+	// Resolve apiKeyID → name at serialize time so renames stay current and the
+	// hot record path stays free of name lookups.
+	rawLogs := h.getRequestLogs()
+	id2name := make(map[string]string)
+	for _, e := range config.ListApiKeys() {
+		id2name[e.ID] = e.Name
+	}
+	logs := make([]RequestLog, len(rawLogs))
+	for i, l := range rawLogs {
+		if l.ApiKeyID != "" {
+			if name, ok := id2name[l.ApiKeyID]; ok {
+				l.ApiKeyName = name
+			}
+		}
+		logs[i] = l
+	}
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"logs": h.getRequestLogs(),
+		"logs": logs,
 	})
 }
 

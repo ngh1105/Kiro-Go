@@ -529,5 +529,21 @@
   "errors.typeSuspended": "封禁",
   "errors.typeOverage": "超额",
   "errors.typeProfile": "配置",
-  "errors.typeUnknown": "未知"
+  "errors.typeUnknown": "未知",
+  "logs.filterKey": "密钥",
+  "logs.filterModel": "模型",
+  "logs.filterEndpoint": "端点",
+  "stats.recentTraffic": "近期流量",
+  "detail.cacheRead": "缓存读",
+  "detail.cacheCreation": "缓存写",
+  "detail.cacheHitRate": "缓存命中率",
+  "apiKeys.export": "导出",
+  "apiKeys.import": "导入",
+  "apiKeys.importTitle": "导入 API 密钥",
+  "apiKeys.importHint": "粘贴 JSON 数组（如 [{\"key\":\"sk-xxx\"}]）或每行一个密钥",
+  "apiKeys.importPlaceholder": "在此粘贴密钥...",
+  "apiKeys.importSuccess": "已导入 {1} 个中的 {0} 个密钥（{2} 个跳过）",
+  "apiKeys.exportDone": "已导出 {0} 个密钥",
+  "api.copyCurl": "复制 curl",
+  "api.curlCopied": "curl 命令已复制"
 }

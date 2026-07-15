@@ -182,6 +182,10 @@
             <i class="fa-solid fa-circle-xmark stat-icon stat-icon--danger" aria-hidden="true"></i>
           </div>
         </div>
+        <div class="stat-card" id="sparklineCard" style="grid-column: span 2;">
+          <div class="stat-card-title" data-i18n="stats.recentTraffic"></div>
+          <div id="statsSparkline" class="stats-sparkline"></div>
+        </div>
       </div>
 
       <!-- Accounts tab -->
@@ -284,6 +288,8 @@
               <option value="credits" data-i18n="apiKeys.sortCredits"></option>
               <option value="requests" data-i18n="apiKeys.sortRequests"></option>
             </select>
+            <button class="btn btn-outline btn-sm" id="apiKeyExportBtn" type="button"><i class="fa-solid fa-file-export"></i><span class="btn-text" data-i18n="apiKeys.export"></span></button>
+            <button class="btn btn-outline btn-sm" id="apiKeyImportBtn" type="button"><i class="fa-solid fa-file-import"></i><span class="btn-text" data-i18n="apiKeys.import"></span></button>
           </div>
           <div id="apiKeysList"></div>
         </div>
@@ -472,7 +478,7 @@
               </div>
               <div class="endpoint api-code-row"><span class="api-code" id="claudeEndpoint"></span><button
                   class="api-copy-btn" type="button" data-copy="claudeEndpoint" aria-label=""
-                  data-i18n-aria-label="api.copyClaude"><i class="fa-regular fa-copy"></i></button></div>
+                  data-i18n-aria-label="api.copyClaude"><i class="fa-regular fa-copy"></i></button><button class="api-copy-btn" type="button" data-curl="messages" data-i18n-title="api.copyCurl" data-i18n-aria-label="api.copyCurl"><i class="fa-solid fa-terminal"></i></button></div>
             </section>
             <section class="api-endpoint-item">
               <div class="api-endpoint-meta">
@@ -484,7 +490,7 @@
               </div>
               <div class="endpoint api-code-row"><span class="api-code" id="openaiEndpoint"></span><button
                   class="api-copy-btn" type="button" data-copy="openaiEndpoint" aria-label=""
-                  data-i18n-aria-label="api.copyOpenAI"><i class="fa-regular fa-copy"></i></button></div>
+                  data-i18n-aria-label="api.copyOpenAI"><i class="fa-regular fa-copy"></i></button><button class="api-copy-btn" type="button" data-curl="openai" data-i18n-title="api.copyCurl" data-i18n-aria-label="api.copyCurl"><i class="fa-solid fa-terminal"></i></button></div>
             </section>
             <section class="api-endpoint-item">
               <div class="api-endpoint-meta">
@@ -496,7 +502,7 @@
               </div>
               <div class="endpoint api-code-row"><span class="api-code" id="openaiResponsesEndpoint"></span><button
                   class="api-copy-btn" type="button" data-copy="openaiResponsesEndpoint" aria-label=""
-                  data-i18n-aria-label="api.copyOpenAIResponses"><i class="fa-regular fa-copy"></i></button></div>
+                  data-i18n-aria-label="api.copyOpenAIResponses"><i class="fa-regular fa-copy"></i></button><button class="api-copy-btn" type="button" data-curl="openai-responses" data-i18n-title="api.copyCurl" data-i18n-aria-label="api.copyCurl"><i class="fa-solid fa-terminal"></i></button></div>
             </section>
             <section class="api-endpoint-item">
               <div class="api-endpoint-meta">
@@ -510,7 +516,7 @@
                   class="api-view-btn" type="button" id="viewModelsBtn" aria-label=""
                   data-i18n-aria-label="api.viewModels"><i class="fa-solid fa-eye"></i></button><button
                   class="api-copy-btn" type="button" data-copy="modelsEndpoint" aria-label=""
-                  data-i18n-aria-label="api.copyModels"><i class="fa-regular fa-copy"></i></button></div>
+                  data-i18n-aria-label="api.copyModels"><i class="fa-regular fa-copy"></i></button><button class="api-copy-btn" type="button" data-curl="models" data-i18n-title="api.copyCurl" data-i18n-aria-label="api.copyCurl"><i class="fa-solid fa-terminal"></i></button></div>
             </section>
             <section class="api-endpoint-item">
               <div class="api-endpoint-meta">
@@ -524,7 +530,7 @@
                   class="api-view-btn" type="button" id="viewStatsBtn" aria-label=""
                   data-i18n-aria-label="api.viewStats"><i class="fa-solid fa-eye"></i></button><button
                   class="api-copy-btn" type="button" data-copy="statsEndpoint" aria-label=""
-                  data-i18n-aria-label="api.copyStats"><i class="fa-regular fa-copy"></i></button></div>
+                  data-i18n-aria-label="api.copyStats"><i class="fa-regular fa-copy"></i></button><button class="api-copy-btn" type="button" data-curl="stats" data-i18n-title="api.copyCurl" data-i18n-aria-label="api.copyCurl"><i class="fa-solid fa-terminal"></i></button></div>
             </section>
           </div>
           <p class="api-hint"><i class="fa-solid fa-key"></i><span data-i18n="api.statsHint"></span></p>
@@ -541,6 +547,15 @@
                 <option value="all" data-i18n="logs.filterAll"></option>
                 <option value="success" data-i18n="logs.filterSuccess"></option>
                 <option value="error" data-i18n="logs.filterError"></option>
+              </select>
+              <select id="logsKeyFilter" class="w-32!" data-i18n-aria-label="logs.filterKey">
+                <option value="" data-i18n="logs.filterKey"></option>
+              </select>
+              <select id="logsModelFilter" class="w-32!" data-i18n-aria-label="logs.filterModel">
+                <option value="" data-i18n="logs.filterModel"></option>
+              </select>
+              <select id="logsEndpointFilter" class="w-32!" data-i18n-aria-label="logs.filterEndpoint">
+                <option value="" data-i18n="logs.filterEndpoint"></option>
               </select>
               <button class="btn btn-outline btn-sm" id="logsRefreshBtn"><i class="fa-solid fa-rotate"></i><span class="btn-text" data-i18n="logs.refresh"></span></button>
               <label class="logs-auto-toggle"><input type="checkbox" id="logsAutoRefresh" /> <span data-i18n="logs.autoRefresh"></span></label>
@@ -699,6 +714,27 @@
         <div class="modal-footer">
           <button class="btn btn-outline" id="apiKeyShowCopyBtn" type="button" data-i18n="apiKeys.copyBtn"></button>
           <button class="btn btn-primary" id="apiKeyShowCloseBtn" type="button" data-i18n="apiKeys.closeBtn"></button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- API Key Import Modal -->
+  <div id="apiKeyImportModal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <span class="modal-title" data-i18n="apiKeys.importTitle"></span>
+        <button class="modal-close" id="apiKeyImportClose" type="button" aria-label=""
+          data-i18n-aria-label="common.close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="help-block" data-i18n="apiKeys.importHint"></p>
+        <div class="form-group">
+          <textarea id="apiKeyImportText" class="font-mono" rows="10" data-i18n-placeholder="apiKeys.importPlaceholder"></textarea>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" id="apiKeyImportCancelBtn" type="button" data-i18n="apiKeys.cancelBtn"></button>
+          <button class="btn btn-primary" id="apiKeyImportSubmitBtn" type="button" data-i18n="apiKeys.import"></button>
         </div>
       </div>
     </div>

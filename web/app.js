@@ -663,6 +663,7 @@
   // Data loaders
   async function loadData() {
     await Promise.all([loadStats(), loadAccounts(), loadSettings(), loadVersion()]);
+    loadLogs();
     renderEndpointCode('claudeEndpoint', baseUrl + '/v1/messages');
     renderEndpointCode('openaiEndpoint', baseUrl + '/v1/chat/completions');
     renderEndpointCode('openaiResponsesEndpoint', baseUrl + '/v1/responses');
@@ -683,6 +684,9 @@
 
   // ===== Logs =====
   let logsFilter = 'all';
+  let logsKeyFilter = '';
+  let logsModelFilter = '';
+  let logsEndpointFilter = '';
   let logsAutoTimer = null;
   let logsCache = [];
 
@@ -714,6 +718,7 @@
       const d = await res.json();
       const logs = d.logs || [];
       renderLogs(logs);
+      renderSparkline();
     } catch (e) {
       // silent
     }
@@ -742,6 +747,66 @@
     return html;
   }
 
+  // A3: populate the key/model/endpoint filter dropdowns from the loaded logs ring.
+  // The leading "all" option is preserved; new options are sorted alphabetically.
+  function populateLogsFilterSelects(logs) {
+    const fillSelect = (selId, getVal, getLabel) => {
+      const sel = $(selId);
+      if (!sel) return;
+      const current = sel.value;
+      const firstOpt = sel.options[0];
+      const allHtml = firstOpt ? firstOpt.outerHTML : '<option value=""></option>';
+      const seen = new Map();
+      for (const l of logs) {
+        const v = getVal(l);
+        if (!v || seen.has(v)) continue;
+        seen.set(v, getLabel(l));
+      }
+      let html = allHtml;
+      for (const [val, label] of Array.from(seen.entries()).sort((a, b) => a[1].localeCompare(b[1]))) {
+        html += '<option value="' + escapeAttr(val) + '">' + escapeHtml(label) + '</option>';
+      }
+      sel.innerHTML = html;
+      sel.value = seen.has(current) ? current : '';
+      if (sel.__customSelect) { renderCustomSelectOptions(sel); syncCustomSelect(sel); }
+    };
+    fillSelect('logsKeyFilter', l => l.apiKeyId || '', l => l.apiKeyName || l.apiKeyId || '');
+    fillSelect('logsModelFilter', l => l.model || '', l => l.model || '');
+    fillSelect('logsEndpointFilter', l => l.endpoint || '', l => l.endpoint || '');
+  }
+
+  // E1: pure inline-SVG sparkline of requests-per-minute from the logs ring.
+  function renderSparkline() {
+    const container = $('statsSparkline');
+    if (!container) return;
+    const logs = logsCache;
+    if (!logs || !logs.length) {
+      container.innerHTML = '<span class="text-muted" style="font-size:0.75rem;">-</span>';
+      return;
+    }
+    const bucketMs = 60 * 1000;
+    const numBuckets = 16;
+    const now = Date.now();
+    const start = now - numBuckets * bucketMs;
+    const buckets = new Array(numBuckets).fill(0);
+    for (const l of logs) {
+      const ts = (l.time || 0) * 1000;
+      if (ts < start) continue;
+      const idx = Math.min(numBuckets - 1, Math.floor((ts - start) / bucketMs));
+      if (idx >= 0) buckets[idx]++;
+    }
+    const maxVal = Math.max(1, ...buckets);
+    const barW = 100 / numBuckets;
+    let bars = '';
+    buckets.forEach((count, i) => {
+      const h = (count / maxVal) * 100;
+      bars += '<rect x="' + (i * barW).toFixed(2) + '" y="' + (100 - h).toFixed(2) +
+        '" width="' + (barW * 0.7).toFixed(2) + '" height="' + h.toFixed(2) +
+        '" rx="1" fill="currentColor" opacity="' + (count > 0 ? '0.75' : '0.12') + '" />';
+    });
+    container.innerHTML = '<svg viewBox="0 0 100 100" preserveAspectRatio="none" style="width:100%;height:42px;color:var(--accent,#3b82f6);">' + bars + '</svg>';
+  }
+
   function renderLogs(logs) {
     logsCache = logs;
     const list = $('logsList');
@@ -750,7 +815,15 @@
 
     // Summary reflects the currently-filtered view (A2): counts plus token/cache
     // aggregates and a prompt-cache hit-rate = cacheRead / (input + cacheRead).
-    const filtered = logs.filter(l => logsFilter === 'all' || l.status === logsFilter);
+    // A3: populate key/model/endpoint filter option lists from the loaded ring.
+    populateLogsFilterSelects(logs);
+    const filtered = logs.filter(l => {
+      if (logsFilter !== 'all' && l.status !== logsFilter) return false;
+      if (logsKeyFilter && (l.apiKeyId || '') !== logsKeyFilter) return false;
+      if (logsModelFilter && (l.model || '') !== logsModelFilter) return false;
+      if (logsEndpointFilter && (l.endpoint || '') !== logsEndpointFilter) return false;
+      return true;
+    });
     const total = filtered.length;
     const okCount = filtered.filter(l => l.status === 'success').length;
     const errCount = total - okCount;
@@ -1276,7 +1349,9 @@
       detailItem(t('detail.errorCount'), a.errorCount || 0) +
       detailItem(t('detail.totalTokens'), formatNum(a.totalTokens || 0)) +
       detailItem(t('detail.totalCredits'), (a.totalCredits || 0).toFixed(2)) +
-      '</div></div>' +
+      '</div>' +
+      '<div class="detail-grid" id="detailCacheGrid" style="margin-top:0.5rem;"></div>' +
+      '</div>' +
 
       '<div class="detail-section">' +
       '<h4>' + escapeHtml(t('detail.models')) +
@@ -1287,6 +1362,34 @@
       '</div>';
 
     openDialog('detailModal');
+    loadDetailCache(id);
+  }
+  // C1: fetch /stats → cacheWindows.byAccount[accountId] for the cache line.
+  async function loadDetailCache(accountId) {
+    var grid = $('detailCacheGrid');
+    if (!grid) return;
+    try {
+      var res = await api('/stats');
+      if (!res.ok) { grid.innerHTML = ''; return; }
+      var d = await res.json();
+      var windows = d.cacheWindows || {};
+      var labels = ['5m', '15m', '1h'];
+      var group = null;
+      for (var i = 0; i < labels.length; i++) {
+        var w = windows[labels[i]];
+        if (w && w.byAccount && w.byAccount[accountId]) { group = w.byAccount[accountId]; break; }
+      }
+      if (!group) { grid.innerHTML = ''; return; }
+      var cr = group.cacheReadInputTokens || 0;
+      var cc = group.cacheCreationInputTokens || 0;
+      var hitRate = (group.ratios && group.ratios.cacheHitRatio != null) ? group.ratios.cacheHitRatio : 0;
+      grid.innerHTML =
+        detailItem(t('detail.cacheRead'), formatNum(cr)) +
+        detailItem(t('detail.cacheCreation'), formatNum(cc)) +
+        detailItem(t('detail.cacheHitRate'), (hitRate * 100).toFixed(1) + '%');
+    } catch (e) {
+      grid.innerHTML = '';
+    }
   }
   async function loadModels(id) {
     const c = $('modelsList');
@@ -2088,6 +2191,104 @@
     }
   }
 
+  // B4: export API keys as JSON — MASKED fields only (never cleartext).
+  function exportApiKeys() {
+    if (!apiKeysCache.length) { toast(t('apiKeys.empty'), 'warning'); return; }
+    var exportData = apiKeysCache.map(function (k) {
+      return {
+        id: k.id || '',
+        name: k.name || '',
+        keyMasked: k.keyMasked || '',
+        enabled: !!k.enabled,
+        createdAt: k.createdAt || 0,
+        lastUsedAt: k.lastUsedAt || 0,
+        tokenLimit: k.tokenLimit || 0,
+        creditLimit: k.creditLimit || 0,
+        tokensUsed: k.tokensUsed || 0,
+        creditsUsed: k.creditsUsed || 0,
+        requestsCount: k.requestsCount || 0
+      };
+    });
+    var blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'kiro-api-keys-' + new Date().toISOString().slice(0, 10) + '.json';
+    a.click();
+    URL.revokeObjectURL(url);
+    toast(t('apiKeys.exportDone', exportData.length), 'success');
+  }
+
+  // B4: import API keys — paste JSON array or one-key-per-line → POST /auth/apikeys-batch.
+  async function importApiKeysSubmit() {
+    var raw = $('apiKeyImportText').value.trim();
+    if (!raw) return;
+    var btn = $('apiKeyImportSubmitBtn');
+    if (btn) btn.disabled = true;
+    try {
+      // Normalize input: accept JSON array, single object, or plain text (one key per line).
+      var keys = raw;
+      try {
+        var parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          keys = parsed.map(function (item) {
+            if (typeof item === 'string') return item;
+            return item.key || item.api_key || item.kiroApiKey || '';
+          }).filter(Boolean).join('\n');
+        } else if (parsed && typeof parsed === 'object') {
+          keys = (parsed.key || parsed.api_key || parsed.kiroApiKey || '').trim();
+        }
+      } catch (e) { /* not JSON — treat as plain text */ }
+      if (!keys.trim()) { toast(t('apikeyBatch.keysMissing'), 'warning'); if (btn) btn.disabled = false; return; }
+      var res = await api('/auth/apikeys-batch', { method: 'POST', body: JSON.stringify({ keys: keys, region: 'us-east-1' }) });
+      var d = await res.json();
+      if (d.success) {
+        closeDialog('apiKeyImportModal');
+        toast(t('apiKeys.importSuccess', d.imported || 0, d.total || 0, d.skipped || 0), 'success', { duration: 6000 });
+        loadAccounts();
+        loadApiKeys();
+      } else {
+        toast(t('common.failed') + ': ' + (d.error || ''), 'error');
+      }
+    } catch (e) {
+      toast(t('common.failed') + ': ' + e.message, 'error');
+    }
+    if (btn) btn.disabled = false;
+  }
+
+  // E2: generate a curl one-liner for the given endpoint type.
+  async function copyCurlCommand(endpoint) {
+    var origin = location.origin;
+    var auth = '-H "Authorization: Bearer YOUR_API_KEY"';
+    var method = 'GET', url = '', headers = auth, body = '';
+    switch (endpoint) {
+      case 'messages':
+        method = 'POST'; url = origin + '/v1/messages';
+        headers += ' \\\n  -H "Content-Type: application/json"';
+        body = ' \\\n  -d \'{"model":"claude-sonnet-4-20250514","max_tokens":1024,"messages":[{"role":"user","content":"Hello"}]}\'';
+        break;
+      case 'openai':
+        method = 'POST'; url = origin + '/v1/chat/completions';
+        headers += ' \\\n  -H "Content-Type: application/json"';
+        body = ' \\\n  -d \'{"model":"claude-sonnet-4-20250514","messages":[{"role":"user","content":"Hello"}]}\'';
+        break;
+      case 'openai-responses':
+        method = 'POST'; url = origin + '/v1/responses';
+        headers += ' \\\n  -H "Content-Type: application/json"';
+        body = ' \\\n  -d \'{"model":"claude-sonnet-4-20250514","input":"Hello"}\'';
+        break;
+      case 'models': method = 'GET'; url = origin + '/v1/models'; break;
+      case 'stats': method = 'GET'; url = origin + '/v1/stats'; break;
+    }
+    var cmd = 'curl -X ' + method + ' \\\n  "' + url + '" \\\n  ' + headers + body;
+    try {
+      await copyText(cmd);
+      toast(t('api.curlCopied'), 'success');
+    } catch (e) {
+      toast(t('common.failed'), 'error');
+    }
+  }
+
   function bindApiKeyEvents() {
     const list = $('apiKeysList');
     if (list) {
@@ -2139,6 +2340,17 @@
     if (showCloseX) showCloseX.addEventListener('click', closeShowApiKeyModal);
     const copyBtn = $('apiKeyShowCopyBtn');
     if (copyBtn) copyBtn.addEventListener('click', copyNewApiKey);
+    var exportBtn = $('apiKeyExportBtn');
+    if (exportBtn) exportBtn.addEventListener('click', exportApiKeys);
+    var importBtn = $('apiKeyImportBtn');
+    if (importBtn) importBtn.addEventListener('click', function () { openDialog('apiKeyImportModal'); });
+    var importClose = $('apiKeyImportClose');
+    if (importClose) importClose.addEventListener('click', function () { closeDialog('apiKeyImportModal'); });
+    var importCancel = $('apiKeyImportCancelBtn');
+    if (importCancel) importCancel.addEventListener('click', function () { closeDialog('apiKeyImportModal'); });
+    var importSubmit = $('apiKeyImportSubmitBtn');
+    if (importSubmit) importSubmit.addEventListener('click', importApiKeysSubmit);
+    bindDialogBackdropClose('apiKeyImportModal', function () { closeDialog('apiKeyImportModal'); });
     bindDialogBackdropClose('apiKeyModal', closeApiKeyModal);
     bindDialogBackdropClose('apiKeyShowModal', closeShowApiKeyModal);
   }
@@ -3195,6 +3407,9 @@
       }
     }));
 
+    // E2: copy curl one-liner for each endpoint card.
+    qsa('[data-curl]').forEach(btn => btn.addEventListener('click', () => copyCurlCommand(btn.dataset.curl)));
+
     // API View buttons
     $('viewModelsBtn').addEventListener('click', showModelsView);
     $('viewStatsBtn').addEventListener('click', showStatsView);
@@ -3213,6 +3428,12 @@
       logsFilter = e.target.value;
       loadLogs();
     });
+    var logsKeyFil = $('logsKeyFilter');
+    if (logsKeyFil) logsKeyFil.addEventListener('change', function (e) { logsKeyFilter = e.target.value; renderLogs(logsCache); });
+    var logsModelFil = $('logsModelFilter');
+    if (logsModelFil) logsModelFil.addEventListener('change', function (e) { logsModelFilter = e.target.value; renderLogs(logsCache); });
+    var logsEndpointFil = $('logsEndpointFilter');
+    if (logsEndpointFil) logsEndpointFil.addEventListener('change', function (e) { logsEndpointFilter = e.target.value; renderLogs(logsCache); });
   }
 
   function bindAccountEvents() {

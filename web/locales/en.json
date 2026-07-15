@@ -529,5 +529,21 @@
   "errors.typeSuspended": "Suspended",
   "errors.typeOverage": "Overage",
   "errors.typeProfile": "Profile",
-  "errors.typeUnknown": "Unknown"
+  "errors.typeUnknown": "Unknown",
+  "logs.filterKey": "Key",
+  "logs.filterModel": "Model",
+  "logs.filterEndpoint": "Endpoint",
+  "stats.recentTraffic": "Recent traffic",
+  "detail.cacheRead": "Cache read",
+  "detail.cacheCreation": "Cache creation",
+  "detail.cacheHitRate": "Cache hit rate",
+  "apiKeys.export": "Export",
+  "apiKeys.import": "Import",
+  "apiKeys.importTitle": "Import API Keys",
+  "apiKeys.importHint": "Paste a JSON array (e.g. [{\"key\":\"sk-xxx\"}]) or one key per line",
+  "apiKeys.importPlaceholder": "Paste keys here...",
+  "apiKeys.importSuccess": "Imported {0} of {1} keys ({2} skipped)",
+  "apiKeys.exportDone": "Exported {0} keys",
+  "api.copyCurl": "Copy curl",
+  "api.curlCopied": "curl command copied"
 }
