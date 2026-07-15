@@ -2113,13 +2113,18 @@
     const section = $('apiKeyForm_usageByModel');
     const body = $('apiKeyForm_usageByModelBody');
     if (!section || !body) return;
-    const map = entry && entry.usageByModel ? entry.usageByModel : null;
-    if (!map || Object.keys(map).length === 0) {
+    // Create flow (no entry): the section is irrelevant for a brand-new key.
+    if (!entry) {
       section.classList.add('hidden');
       body.innerHTML = '';
       return;
     }
     section.classList.remove('hidden');
+    const map = entry.usageByModel ? entry.usageByModel : null;
+    if (!map || Object.keys(map).length === 0) {
+      body.innerHTML = '<p class="muted-text" style="font-size:0.8rem;margin:0;">' + escapeHtml(t('apiKeys.noUsage')) + '</p>';
+      return;
+    }
     const rows = Object.entries(map).sort((a, b) => (b[1].requests || 0) - (a[1].requests || 0));
     let html = '<table style="width:100%;font-size:0.8rem;border-collapse:collapse;">';
     html += '<thead><tr>' +

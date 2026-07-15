@@ -555,6 +555,7 @@
   "apiKeys.allowedIPsPlaceholder": "1.2.3.4, 10.0.0.0/8",
   "apiKeys.usageByModel": "Usage by model",
   "apiKeys.model": "Model",
+  "apiKeys.noUsage": "No per-model usage yet",
   "settings.rateLimitSettings": "Rate Limit",
   "settings.rateLimitRpm": "Global requests / min",
   "settings.rateLimitRpmHint": "0 = unlimited",

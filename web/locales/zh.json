@@ -555,6 +555,7 @@
   "apiKeys.allowedIPsPlaceholder": "1.2.3.4, 10.0.0.0/8",
   "apiKeys.usageByModel": "按模型用量",
   "apiKeys.model": "模型",
+  "apiKeys.noUsage": "暂无按模型用量",
   "settings.rateLimitSettings": "速率限制",
   "settings.rateLimitRpm": "全局请求 / 分钟",
   "settings.rateLimitRpmHint": "0 = 不限制",
