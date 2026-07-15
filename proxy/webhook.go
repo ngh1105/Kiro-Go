@@ -14,6 +14,7 @@ import (
 	"kiro-go/config"
 	"kiro-go/logger"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -50,4 +51,33 @@ func notifyWebhook(event string, payload map[string]interface{}) {
 		}
 		_ = resp.Body.Close()
 	}()
+}
+
+// over-limit webhook dedup. A key that stays over quota gets retried on every
+// request (clients commonly retry on 429); without a cooldown each retry would
+// spawn a goroutine + webhook POST, exhausting goroutines/connections under
+// sustained load and flooding the webhook with duplicate events. Cool to at
+// most one "key.over_limit" notification per key per window. Bounded by the
+// number of keys (one map entry per key ever over limit).
+var (
+	overLimitNotifyMu   sync.Mutex
+	overLimitNotifyLast = make(map[string]time.Time)
+)
+
+const overLimitNotifyCooldown = 60 * time.Second
+
+// shouldNotifyOverLimit reports whether an over-limit webhook for apiKeyID
+// should fire now (true) or is still on cooldown (false), recording the time.
+// An empty apiKeyID (legacy single-key path has no per-entry id) always fires.
+func shouldNotifyOverLimit(apiKeyID string, now time.Time) bool {
+	if apiKeyID == "" {
+		return true
+	}
+	overLimitNotifyMu.Lock()
+	defer overLimitNotifyMu.Unlock()
+	if last, ok := overLimitNotifyLast[apiKeyID]; ok && now.Sub(last) < overLimitNotifyCooldown {
+		return false
+	}
+	overLimitNotifyLast[apiKeyID] = now
+	return true
 }

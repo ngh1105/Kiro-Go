@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // apiKeyContextKey is an unexported type used as the context key for the matched ApiKeyEntry
@@ -74,15 +75,19 @@ func (h *Handler) authenticate(r *http.Request) (*config.ApiKeyEntry, error) {
 		}
 		if overToken, overCredit := config.ApiKeyOverLimit(*entry); overToken || overCredit {
 			// D3: notify webhook (key id/name + limit type only — no key value).
-			limitType := "credit"
-			if overToken {
-				limitType = "token"
+			// Cool by key so a client retrying on 429 can't storm the webhook +
+			// spawn unbounded goroutines while the key stays over quota.
+			if shouldNotifyOverLimit(entry.ID, time.Now()) {
+				limitType := "credit"
+				if overToken {
+					limitType = "token"
+				}
+				notifyWebhook("key.over_limit", map[string]interface{}{
+					"apiKeyId":   entry.ID,
+					"apiKeyName": entry.Name,
+					"limitType":  limitType,
+				})
 			}
-			notifyWebhook("key.over_limit", map[string]interface{}{
-				"apiKeyId":   entry.ID,
-				"apiKeyName": entry.Name,
-				"limitType":  limitType,
-			})
 			if overToken {
 				return nil, newAuthError(http.StatusTooManyRequests, "rate_limit_error", "token limit exceeded")
 			}
