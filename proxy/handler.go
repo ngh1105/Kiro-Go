@@ -254,6 +254,15 @@ func NewHandler() *Handler {
 		promptCache:     newPromptCacheTracker(defaultPromptCacheTTL),
 	}
 	cachePath := filepath.Join(config.GetConfigDir(), "prompt_cache.json")
+	// A4: seed the in-memory ring from durable log storage so logs survive
+	// restart. LoadRecentLogs returns oldest-first (file order), which matches
+	// the ring's append semantics (oldest at index 0, newest at the tail) — so
+	// getRequestLogs' reverse-to-newest-first output stays correct. Cap at the
+	// ring size to avoid over-allocating on a very large jsonl.
+	if recent := LoadRecentLogs(requestLogsMaxSize); len(recent) > 0 {
+		h.requestLogs = make([]RequestLog, 0, requestLogsMaxSize)
+		h.requestLogs = append(h.requestLogs, recent...)
+	}
 	h.promptCache.Load(cachePath)
 	h.promptCache.startSaveLoop(cachePath, 30*time.Second)
 	// 启动后台刷新
@@ -1333,7 +1342,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		}
 		outputTokens = estimateClaudeOutputTokens(outputContent, thinkingOutput, toolUses)
 
-		h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, credits)
+		h.recordSuccessForApiKey(apiKeyID, model, inputTokens, outputTokens, credits)
 		h.pool.RecordSuccess(account.ID)
 		// h.pool.RecordLatency(account.ID, float64(time.Since(reqStart).Milliseconds()))
 		// ↑ dispatch-only latency EWMA (commit fbc99b1), absent on this cache-only
@@ -1464,13 +1473,20 @@ func (h *Handler) recordSuccess(inputTokens, outputTokens int, credits float64) 
 // recordSuccessForApiKey is recordSuccess + per-API-key usage attribution.
 // When apiKeyID is empty (legacy single-key path or unauthenticated path), only the
 // global counters are updated. Persistence errors are logged but do not propagate.
-func (h *Handler) recordSuccessForApiKey(apiKeyID string, inputTokens, outputTokens int, credits float64) {
+// model threads into the per-model breakdown (B5); empty model skips that bucket.
+func (h *Handler) recordSuccessForApiKey(apiKeyID, model string, inputTokens, outputTokens int, credits float64) {
 	h.recordSuccess(inputTokens, outputTokens, credits)
 	if apiKeyID == "" {
 		return
 	}
-	if err := config.RecordApiKeyUsage(apiKeyID, int64(inputTokens+outputTokens), credits); err != nil {
+	total := int64(inputTokens + outputTokens)
+	if err := config.RecordApiKeyUsage(apiKeyID, total, credits); err != nil {
 		logger.Warnf("[ApiKey] failed to record usage for key %s: %v", apiKeyID, err)
+	}
+	if model != "" {
+		if err := config.RecordApiKeyModelUsage(apiKeyID, model, total, credits); err != nil {
+			logger.Warnf("[ApiKey] failed to record model usage for key %s model %s: %v", apiKeyID, model, err)
+		}
 	}
 }
 
@@ -1534,6 +1550,9 @@ func (h *Handler) appendRequestLog(entry RequestLog) {
 	}
 	h.requestLogs = append(h.requestLogs, entry)
 	h.requestLogsMu.Unlock()
+	// A4: persist asynchronously. recordLog is nil-safe + non-blocking (drops on
+	// full buffer). RequestLog carries ApiKeyID/ApiKeyName only — never the key.
+	recordLog(entry)
 }
 
 // classifyError categorizes an error message into a type for display.
@@ -1658,7 +1677,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		}
 		outputTokens = estimateClaudeOutputTokens(finalContent, rawThinkingContent, toolUses)
 
-		h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, credits)
+		h.recordSuccessForApiKey(apiKeyID, model, inputTokens, outputTokens, credits)
 		h.pool.RecordSuccess(account.ID)
 		// h.pool.RecordLatency(account.ID, float64(time.Since(reqStart).Milliseconds()))
 		// ↑ dispatch-only latency EWMA (commit fbc99b1), absent on this cache-only
@@ -2169,7 +2188,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 			outputTokens += estimateApproxTokens(tc.Function.Arguments)
 		}
 
-		h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, credits)
+		h.recordSuccessForApiKey(apiKeyID, model, inputTokens, outputTokens, credits)
 		h.pool.RecordSuccess(account.ID)
 		// h.pool.RecordLatency(account.ID, float64(time.Since(reqStart).Milliseconds()))
 		// ↑ dispatch-only latency EWMA (commit fbc99b1), absent on this cache-only
@@ -2319,7 +2338,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 		}
 		outputTokens = estimateOpenAIOutputTokens(finalContent, reasoningContent, toolUses)
 
-		h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, credits)
+		h.recordSuccessForApiKey(apiKeyID, model, inputTokens, outputTokens, credits)
 		h.pool.RecordSuccess(account.ID)
 		// h.pool.RecordLatency(account.ID, float64(time.Since(reqStart).Milliseconds()))
 		// ↑ dispatch-only latency EWMA (commit fbc99b1), absent on this cache-only
@@ -2582,6 +2601,7 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 			"hasToken":          a.AccessToken != "",
 			"machineId":         a.MachineId,
 			"weight":            a.Weight,
+			"tags":              a.Tags,
 			"overageStatus":     a.OverageStatus,
 			"overageCapability": a.OverageCapability,
 			"overageCap":        a.OverageCap,
@@ -2710,6 +2730,9 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 	if v, ok := updates["proxyURL"].(string); ok {
 		existing.ProxyURL = v
 	}
+	if v, ok := updates["tags"]; ok {
+		existing.Tags = toStringSlice(v)
+	}
 
 	if err := config.UpdateAccount(id, *existing); err != nil {
 		w.WriteHeader(500)
@@ -2727,6 +2750,30 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 		}(*existing)
 	}
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
+}
+
+// toStringSlice coerces a JSON-decoded value (typically []interface{} of
+// float64-as-string or string) into a clean []string. Used for the tags patch
+// where the frontend sends a JSON array of strings.
+func toStringSlice(v interface{}) []string {
+	if v == nil {
+		return nil
+	}
+	switch t := v.(type) {
+	case []string:
+		out := make([]string, len(t))
+		copy(out, t)
+		return out
+	case []interface{}:
+		out := make([]string, 0, len(t))
+		for _, item := range t {
+			if s, ok := item.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return nil
 }
 
 // apiGetAccountOverage 拉取并返回单个账号的上游 Overages 状态。
@@ -3731,12 +3778,16 @@ func (h *Handler) apiGetStatus(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) apiGetSettings(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"apiKey":          config.GetApiKey(),
-		"requireApiKey":   config.IsApiKeyRequired(),
-		"port":            config.GetPort(),
-		"host":            config.GetHost(),
-		"allowOverUsage":  config.GetAllowOverUsage(),
-		"maxPayloadBytes": config.GetMaxPayloadBytes(),
+		"apiKey":                config.GetApiKey(),
+		"requireApiKey":         config.IsApiKeyRequired(),
+		"port":                  config.GetPort(),
+		"host":                  config.GetHost(),
+		"allowOverUsage":        config.GetAllowOverUsage(),
+		"maxPayloadBytes":       config.GetMaxPayloadBytes(),
+		"rateLimitRpm":          config.GetRateLimit(),
+		"rateLimitPerKeyRpm":    config.GetRateLimitPerKey(),
+		"rateLimitBurstSeconds": config.GetRateLimitBurst(),
+		"webhookUrl":            config.GetWebhookURL(),
 	})
 }
 
@@ -3785,11 +3836,15 @@ func (h *Handler) apiUpdatePromptFilter(w http.ResponseWriter, r *http.Request) 
 
 func (h *Handler) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ApiKey          *string `json:"apiKey,omitempty"`
-		RequireApiKey   *bool   `json:"requireApiKey,omitempty"`
-		Password        string  `json:"password,omitempty"`
-		AllowOverUsage  *bool   `json:"allowOverUsage,omitempty"`
-		MaxPayloadBytes *int    `json:"maxPayloadBytes,omitempty"`
+		ApiKey                *string  `json:"apiKey,omitempty"`
+		RequireApiKey         *bool    `json:"requireApiKey,omitempty"`
+		Password              string   `json:"password,omitempty"`
+		AllowOverUsage        *bool    `json:"allowOverUsage,omitempty"`
+		MaxPayloadBytes       *int     `json:"maxPayloadBytes,omitempty"`
+		RateLimitRPM          *float64 `json:"rateLimitRpm,omitempty"`
+		RateLimitPerKeyRPM    *float64 `json:"rateLimitPerKeyRpm,omitempty"`
+		RateLimitBurstSeconds *float64 `json:"rateLimitBurstSeconds,omitempty"`
+		WebhookURL            *string  `json:"webhookUrl,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -3816,6 +3871,36 @@ func (h *Handler) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 
 	if req.MaxPayloadBytes != nil {
 		if err := config.UpdateMaxPayloadBytes(*req.MaxPayloadBytes); err != nil {
+			w.WriteHeader(500)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+	}
+
+	// Rate limit / webhook (D2/D3). Any of the three RL ptrs present triggers a
+	// single UpdateRateLimit using current config values for the omitted ones.
+	// Applied at next restart — token buckets are NOT live-reconfigured.
+	if req.RateLimitRPM != nil || req.RateLimitPerKeyRPM != nil || req.RateLimitBurstSeconds != nil {
+		rpm := config.GetRateLimit()
+		perKey := config.GetRateLimitPerKey()
+		burst := config.GetRateLimitBurst()
+		if req.RateLimitRPM != nil {
+			rpm = *req.RateLimitRPM
+		}
+		if req.RateLimitPerKeyRPM != nil {
+			perKey = *req.RateLimitPerKeyRPM
+		}
+		if req.RateLimitBurstSeconds != nil {
+			burst = *req.RateLimitBurstSeconds
+		}
+		if err := config.UpdateRateLimit(rpm, perKey, burst); err != nil {
+			w.WriteHeader(500)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+	}
+	if req.WebhookURL != nil {
+		if err := config.UpdateWebhookURL(*req.WebhookURL); err != nil {
 			w.WriteHeader(500)
 			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
@@ -4083,6 +4168,7 @@ func (h *Handler) apiGetAccountFull(w http.ResponseWriter, r *http.Request, id s
 		"expiresAt":         account.ExpiresAt,
 		"machineId":         account.MachineId,
 		"weight":            account.Weight,
+		"tags":              account.Tags,
 		"overageStatus":     account.OverageStatus,
 		"overageCapability": account.OverageCapability,
 		"overageCap":        account.OverageCap,

@@ -9,18 +9,20 @@ import (
 // apiKeyView is the response payload for listing/inspecting API keys. The Key field
 // is masked so admins can identify entries without exposing the secret.
 type apiKeyView struct {
-	ID            string  `json:"id"`
-	Name          string  `json:"name,omitempty"`
-	KeyMasked     string  `json:"keyMasked"`
-	Enabled       bool    `json:"enabled"`
-	Migrated      bool    `json:"migrated,omitempty"`
-	CreatedAt     int64   `json:"createdAt"`
-	LastUsedAt    int64   `json:"lastUsedAt,omitempty"`
-	TokenLimit    int64   `json:"tokenLimit,omitempty"`
-	CreditLimit   float64 `json:"creditLimit,omitempty"`
-	TokensUsed    int64   `json:"tokensUsed"`
-	CreditsUsed   float64 `json:"creditsUsed"`
-	RequestsCount int64   `json:"requestsCount"`
+	ID            string                       `json:"id"`
+	Name          string                       `json:"name,omitempty"`
+	KeyMasked     string                       `json:"keyMasked"`
+	Enabled       bool                         `json:"enabled"`
+	Migrated      bool                         `json:"migrated,omitempty"`
+	CreatedAt     int64                        `json:"createdAt"`
+	LastUsedAt    int64                        `json:"lastUsedAt,omitempty"`
+	TokenLimit    int64                        `json:"tokenLimit,omitempty"`
+	CreditLimit   float64                      `json:"creditLimit,omitempty"`
+	TokensUsed    int64                        `json:"tokensUsed"`
+	CreditsUsed   float64                      `json:"creditsUsed"`
+	RequestsCount int64                        `json:"requestsCount"`
+	UsageByModel  map[string]config.ModelUsage `json:"usageByModel,omitempty"`
+	AllowedIPs    []string                     `json:"allowedIPs,omitempty"`
 }
 
 func toApiKeyView(e config.ApiKeyEntry) apiKeyView {
@@ -37,6 +39,8 @@ func toApiKeyView(e config.ApiKeyEntry) apiKeyView {
 		TokensUsed:    e.TokensUsed,
 		CreditsUsed:   e.CreditsUsed,
 		RequestsCount: e.RequestsCount,
+		UsageByModel:  e.UsageByModel,
+		AllowedIPs:    e.AllowedIPs,
 	}
 }
 
@@ -113,6 +117,9 @@ type apiKeyUpdateRequest struct {
 	Enabled     *bool    `json:"enabled,omitempty"`
 	TokenLimit  *int64   `json:"tokenLimit,omitempty"`
 	CreditLimit *float64 `json:"creditLimit,omitempty"`
+	// AllowedIPs: nil (absent from JSON) = unchanged; a non-nil slice (even
+	// empty) = replace. Send [] to clear the allowlist (allow all IPs).
+	AllowedIPs []string `json:"allowedIPs,omitempty"`
 }
 
 func (h *Handler) apiUpdateApiKey(w http.ResponseWriter, r *http.Request, id string) {
@@ -146,8 +153,12 @@ func (h *Handler) apiUpdateApiKey(w http.ResponseWriter, r *http.Request, id str
 	if req.CreditLimit != nil {
 		patch.CreditLimit = *req.CreditLimit
 	}
+	allowIPsPresent := req.AllowedIPs != nil
+	if allowIPsPresent {
+		patch.AllowedIPs = req.AllowedIPs
+	}
 
-	if err := config.UpdateApiKey(id, patch); err != nil {
+	if err := config.UpdateApiKeyWithFlags(id, patch, allowIPsPresent); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return

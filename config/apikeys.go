@@ -71,10 +71,20 @@ func AddApiKey(entry ApiKeyEntry) (ApiKeyEntry, error) {
 // UpdateApiKey applies a patch to an existing API key. Patch semantics:
 //   - Name, Key are overwritten when non-empty in patch.
 //   - Enabled, TokenLimit, CreditLimit are always overwritten (zero values are valid).
+//   - AllowedIPs: handled via patchAllPresent flag — see UpdateApiKeyWithFlags.
 //   - Counters (TokensUsed/CreditsUsed/RequestsCount) are not touched here; use
 //     RecordApiKeyUsage or ResetApiKeyUsage instead.
 //   - Migrated stays as-is once true; only flips when explicitly set in patch.
 func UpdateApiKey(id string, patch ApiKeyEntry) error {
+	return UpdateApiKeyWithFlags(id, patch, false)
+}
+
+// UpdateApiKeyWithFlags mirrors UpdateApiKey but additionally applies AllowedIPs
+// when allowIPsPresent is true. The flag distinguishes "not in patch" (nil →
+// unchanged) from "explicit empty slice" ([]string{} → clear the allowlist, i.e.
+// allow all). This two-value encoding is required because a nil slice and an empty
+// slice are otherwise indistinguishable in a plain ApiKeyEntry value.
+func UpdateApiKeyWithFlags(id string, patch ApiKeyEntry, allowIPsPresent bool) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
 	if cfg == nil {
@@ -106,6 +116,12 @@ func UpdateApiKey(id string, patch ApiKeyEntry) error {
 	cfg.ApiKeys[idx].Enabled = patch.Enabled
 	cfg.ApiKeys[idx].TokenLimit = patch.TokenLimit
 	cfg.ApiKeys[idx].CreditLimit = patch.CreditLimit
+	if allowIPsPresent {
+		// Explicit copy so a shared backing array can't leak across entries.
+		ip := make([]string, len(patch.AllowedIPs))
+		copy(ip, patch.AllowedIPs)
+		cfg.ApiKeys[idx].AllowedIPs = ip
+	}
 	if patch.Migrated {
 		cfg.ApiKeys[idx].Migrated = true
 	}
@@ -174,6 +190,35 @@ func RecordApiKeyUsage(id string, tokens int64, credits float64) error {
 			}
 			cfg.ApiKeys[i].RequestsCount++
 			cfg.ApiKeys[i].LastUsedAt = time.Now().Unix()
+			return saveLocked()
+		}
+	}
+	return errors.New("api key not found")
+}
+
+// RecordApiKeyModelUsage adds tokens/credits to the per-model breakdown for the
+// entry (mirrors RecordApiKeyUsage's locking model). Requests count is bumped by
+// 1 so UsageByModel[model].Requests == number of successful calls for that model.
+// The map is lazily initialized. Errors are logged by callers, not propagated.
+func RecordApiKeyModelUsage(id, model string, tokens int64, credits float64) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	if cfg == nil {
+		return errors.New("config not initialized")
+	}
+	if model == "" {
+		return nil
+	}
+	for i := range cfg.ApiKeys {
+		if cfg.ApiKeys[i].ID == id {
+			if cfg.ApiKeys[i].UsageByModel == nil {
+				cfg.ApiKeys[i].UsageByModel = make(map[string]ModelUsage)
+			}
+			m := cfg.ApiKeys[i].UsageByModel[model]
+			m.Tokens += tokens
+			m.Credits += credits
+			m.Requests++
+			cfg.ApiKeys[i].UsageByModel[model] = m
 			return saveLocked()
 		}
 	}

@@ -19,6 +19,7 @@ package proxy
 //
 // Ported verbatim from kiro-tutu (zero-dep).
 import (
+	"kiro-go/config"
 	"os"
 	"strconv"
 	"strings"
@@ -117,6 +118,26 @@ func newRateLimiterFromEnv() *rateLimiter {
 		envFloat("KIRO_RATE_LIMIT_PER_KEY_RPM", 0),
 		envFloat("KIRO_RATE_LIMIT_BURST_SECONDS", 10),
 	)
+}
+
+// newRateLimiterFromConfig builds the limiter from persisted config values,
+// falling back to the KIRO_RATE_LIMIT_* env when a config value is 0 (so
+// existing env-only deployments are unaffected). Token buckets are fixed at
+// startup — runtime config changes apply on next restart, NOT live.
+func newRateLimiterFromConfig() *rateLimiter {
+	rpm := config.GetRateLimit()
+	if rpm == 0 {
+		rpm = envFloat("KIRO_RATE_LIMIT_RPM", 0)
+	}
+	perKey := config.GetRateLimitPerKey()
+	if perKey == 0 {
+		perKey = envFloat("KIRO_RATE_LIMIT_PER_KEY_RPM", 0)
+	}
+	burst := config.GetRateLimitBurst()
+	if burst == 0 {
+		burst = envFloat("KIRO_RATE_LIMIT_BURST_SECONDS", 10)
+	}
+	return newRateLimiter(rpm, perKey, burst)
 }
 
 func envFloat(name string, def float64) float64 {

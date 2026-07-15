@@ -273,7 +273,7 @@ func TestRecordSuccessForApiKeyUpdatesEntry(t *testing.T) {
 	}
 
 	h := &Handler{}
-	h.recordSuccessForApiKey(created.ID, 25, 30, 0.75)
+	h.recordSuccessForApiKey(created.ID, "claude-test", 25, 30, 0.75)
 
 	got := config.GetApiKeyEntry(created.ID)
 	if got == nil {
@@ -288,6 +288,9 @@ func TestRecordSuccessForApiKeyUpdatesEntry(t *testing.T) {
 	if got.RequestsCount != 1 {
 		t.Fatalf("expected RequestsCount=1, got %d", got.RequestsCount)
 	}
+	if mu, ok := got.UsageByModel["claude-test"]; !ok || mu.Tokens <= 0 || mu.Requests != 1 {
+		t.Fatalf("expected UsageByModel[claude-test] populated, got %+v", got.UsageByModel)
+	}
 }
 
 func TestRecordSuccessForApiKeyEmptyIDIsNoop(t *testing.T) {
@@ -298,7 +301,7 @@ func TestRecordSuccessForApiKeyEmptyIDIsNoop(t *testing.T) {
 	}
 
 	h := &Handler{}
-	h.recordSuccessForApiKey("", 100, 100, 1)
+	h.recordSuccessForApiKey("", "claude-test", 100, 100, 1)
 	got := config.GetApiKeyEntry(created.ID)
 	if got == nil {
 		t.Fatalf("entry missing")

@@ -72,6 +72,11 @@ func main() {
 	proxy.InitAuditStore(filepath.Dir(configPath))
 	defer proxy.CloseAuditStore()
 
+	// 初始化请求日志持久化（JSONL，异步非阻塞，缓冲满即丢弃计数；KIRO_LOG_PERSIST_DISABLE 可关闭）。
+	// 必须在 NewHandler 之前初始化，以便 NewHandler 从 LoadRecentLogs 预热内存环形缓冲区。
+	proxy.InitLogStore(filepath.Dir(configPath))
+	defer proxy.CloseLogStore()
+
 	// 创建 HTTP 处理器（包含后台刷新任务）
 	handler := proxy.NewHandler()
 

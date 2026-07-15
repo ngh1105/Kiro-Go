@@ -111,6 +111,13 @@ func (h *Handler) disableAccount(account *config.Account, banStatus, banReason s
 	}
 
 	logger.Warnf("[AccountFailover] Disabled %s: %s", account.Email, banReason)
+	// D3: notify webhook (account id/email + ban status/reason only — no tokens).
+	notifyWebhook("account.banned", map[string]interface{}{
+		"accountId": account.ID,
+		"email":     account.Email,
+		"banStatus": banStatus,
+		"banReason": banReason,
+	})
 	h.pool.Reload()
 }
 

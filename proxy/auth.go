@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"kiro-go/config"
+	"net"
 	"net/http"
 	"strings"
 )
@@ -72,10 +73,27 @@ func (h *Handler) authenticate(r *http.Request) (*config.ApiKeyEntry, error) {
 			return nil, newAuthError(http.StatusUnauthorized, "authentication_error", "API key disabled")
 		}
 		if overToken, overCredit := config.ApiKeyOverLimit(*entry); overToken || overCredit {
+			// D3: notify webhook (key id/name + limit type only — no key value).
+			limitType := "credit"
+			if overToken {
+				limitType = "token"
+			}
+			notifyWebhook("key.over_limit", map[string]interface{}{
+				"apiKeyId":   entry.ID,
+				"apiKeyName": entry.Name,
+				"limitType":  limitType,
+			})
 			if overToken {
 				return nil, newAuthError(http.StatusTooManyRequests, "rate_limit_error", "token limit exceeded")
 			}
 			return nil, newAuthError(http.StatusTooManyRequests, "rate_limit_error", "credit limit exceeded")
+		}
+		// B7: per-key IP allowlist. Non-empty AllowedIPs restricts which client
+		// IPs may use this key. Checked AFTER auth + quota so a rejected IP never
+		// reveals whether the key exists — it only fires for a valid, enabled,
+		// in-quota key, returning the same 403 an outsider would get.
+		if len(entry.AllowedIPs) > 0 && !ipAllowed(clientIP(r), entry.AllowedIPs) {
+			return nil, newAuthError(http.StatusForbidden, "authentication_error", "IP not allowed")
 		}
 		return entry, nil
 	}
@@ -104,6 +122,41 @@ func withApiKeyContext(r *http.Request, entry *config.ApiKeyEntry) *http.Request
 	}
 	ctx := context.WithValue(r.Context(), apiKeyContextKey{}, entry.ID)
 	return r.WithContext(ctx)
+}
+
+// ipAllowed reports whether clientAddr matches any entry in the allowed list.
+// Entries may be exact IP strings ("1.2.3.4") or CIDR ranges ("10.0.0.0/8").
+// An empty allowed list means "allow all". Bare-IP entries are matched both by
+// raw string equality and by net.IP equality (so "::1" matches the canonical
+// "0:0:0:0:0:0:0:1" form). CIDR entries are parsed once per check.
+func ipAllowed(clientAddr string, allowed []string) bool {
+	if len(allowed) == 0 {
+		return true
+	}
+	clientIP := net.ParseIP(clientAddr)
+	for _, entry := range allowed {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if strings.Contains(entry, "/") {
+			if _, ipNet, err := net.ParseCIDR(entry); err == nil {
+				if clientIP != nil && ipNet.Contains(clientIP) {
+					return true
+				}
+			}
+			continue
+		}
+		if entry == clientAddr {
+			return true
+		}
+		if clientIP != nil {
+			if ip := net.ParseIP(entry); ip != nil && ip.Equal(clientIP) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // apiKeyIDFromContext returns the matched API key ID stored in ctx, or empty string.

@@ -15,6 +15,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -167,6 +168,9 @@ type Account struct {
 	// Priority weight for load balancing (higher = more requests)
 	Weight int `json:"weight,omitempty"` // 0 or 1 = normal, 2+ = higher priority
 
+	// Tags are free-form labels for grouping/filtering accounts in the admin panel.
+	Tags []string `json:"tags,omitempty"`
+
 	// Upstream Overages state (mirrored from AWS Q `setUserPreference` / `getUsageLimits`).
 	// OverageStatus is the only switch that decides whether to keep dispatching once UsageLimit is reached.
 	// Allowed values: "ENABLED", "DISABLED", "UNKNOWN" (or empty when not yet fetched).
@@ -285,6 +289,14 @@ type PromptFilterRule struct {
 	Enabled bool   `json:"enabled"`           // Whether this rule is active
 }
 
+// ModelUsage breaks down per-API-key usage by model, so the admin panel can show
+// which models each key actually drives. Tokens/Credits/Requests are cumulative.
+type ModelUsage struct {
+	Tokens   int64   `json:"tokens,omitempty"`
+	Credits  float64 `json:"credits,omitempty"`
+	Requests int64   `json:"requests,omitempty"`
+}
+
 // ApiKeyEntry represents a single API key with optional usage limits and counters.
 // Limits with value 0 are treated as "no limit". Counters are cumulative and never reset
 // automatically; operators can use the admin endpoint to manually reset them.
@@ -305,6 +317,13 @@ type ApiKeyEntry struct {
 	TokensUsed    int64   `json:"tokensUsed,omitempty"`
 	CreditsUsed   float64 `json:"creditsUsed,omitempty"`
 	RequestsCount int64   `json:"requestsCount,omitempty"`
+
+	// Per-model breakdown (lazy-init; cumulative, never auto-reset).
+	UsageByModel map[string]ModelUsage `json:"usageByModel,omitempty"`
+
+	// AllowedIPs restricts which client IPs may use this key. Empty = allow all.
+	// Entries may be exact IPs ("1.2.3.4") or CIDR ranges ("10.0.0.0/8").
+	AllowedIPs []string `json:"allowedIPs,omitempty"`
 }
 
 // Config represents the global application configuration.
@@ -387,6 +406,18 @@ type Config struct {
 	// before the next turn reuses them (mirrors kiro-rs's 131072 default). The
 	// tracker clamps explicit small values up to 256.
 	PromptCacheMaxEntries int `json:"promptCacheMaxEntries,omitempty"`
+
+	// Rate limiting (config-backed with env override; applied at startup, next-restart
+	// on change). A value of 0 means "inherit the KIRO_RATE_LIMIT_* env" (effectively
+	// unlimited when env is also 0). NOT live-reconfigurable — token buckets are fixed
+	// at process start to avoid mid-flight races.
+	RateLimitRPM          float64 `json:"rateLimitRpm,omitempty"`
+	RateLimitPerKeyRPM    float64 `json:"rateLimitPerKeyRpm,omitempty"`
+	RateLimitBurstSeconds float64 `json:"rateLimitBurstSeconds,omitempty"`
+
+	// WebhookURL receives async best-effort POST notifications on account ban /
+	// key over-limit events. Payload carries id/name/reason only — never tokens.
+	WebhookURL string `json:"webhookUrl,omitempty"`
 
 	// Global statistics (persisted across restarts)
 	TotalRequests   int     `json:"totalRequests,omitempty"`   // Total API requests received
@@ -1260,6 +1291,71 @@ func UpdateMaxPayloadBytes(n int) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
 	cfg.MaxPayloadBytes = n
+	return Save()
+}
+
+// GetRateLimit returns the global RPM cap (0 = unlimited / inherit env).
+func GetRateLimit() float64 {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil {
+		return 0
+	}
+	return cfg.RateLimitRPM
+}
+
+// GetRateLimitPerKey returns the per-key RPM cap (0 = unlimited / inherit env).
+func GetRateLimitPerKey() float64 {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil {
+		return 0
+	}
+	return cfg.RateLimitPerKeyRPM
+}
+
+// GetRateLimitBurst returns the burst window seconds (0 = inherit env default 10).
+func GetRateLimitBurst() float64 {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil {
+		return 0
+	}
+	return cfg.RateLimitBurstSeconds
+}
+
+// GetWebhookURL returns the configured notification webhook URL (empty = disabled).
+func GetWebhookURL() string {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil {
+		return ""
+	}
+	return cfg.WebhookURL
+}
+
+// UpdateRateLimit persists all three rate-limit knobs. Applied at next restart
+// (token buckets are NOT live-reconfigured to avoid mid-flight races).
+func UpdateRateLimit(rpm, perKey, burst float64) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	if cfg == nil {
+		return errors.New("config not initialized")
+	}
+	cfg.RateLimitRPM = rpm
+	cfg.RateLimitPerKeyRPM = perKey
+	cfg.RateLimitBurstSeconds = burst
+	return Save()
+}
+
+// UpdateWebhookURL persists the notification webhook URL.
+func UpdateWebhookURL(url string) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	if cfg == nil {
+		return errors.New("config not initialized")
+	}
+	cfg.WebhookURL = url
 	return Save()
 }
 

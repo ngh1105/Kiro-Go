@@ -82,10 +82,11 @@ func (s *statusRecorder) Flush() {
 // Unwrap lets http.ResponseController reach the underlying writer (deadlines etc.).
 func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter }
 
-// WrapHardening wraps inner with the full production middleware chain, reading
-// rate limits from the environment.
+// WrapHardening wraps inner with the full production middleware chain, building
+// the rate limiter from config (with env fallback). Token buckets are fixed at
+// startup; runtime config changes apply on next restart.
 func WrapHardening(inner http.Handler) http.Handler {
-	return wrapHardeningWith(inner, newRateLimiterFromEnv())
+	return wrapHardeningWith(inner, newRateLimiterFromConfig())
 }
 
 func wrapHardeningWith(inner http.Handler, rl *rateLimiter) http.Handler {
