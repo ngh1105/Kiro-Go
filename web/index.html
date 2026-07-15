@@ -257,6 +257,34 @@
             </div>
             <small data-i18n="apiKeys.listHint"></small>
           </div>
+          <div class="toolbar" style="margin-top:0.5rem;">
+            <label class="flex items-center gap-1.5 cursor-pointer select-none shrink-0">
+              <input type="checkbox" id="apiKeySelectAll" />
+              <span class="text-xs" data-i18n="batch.selectAll"></span>
+            </label>
+            <div id="apiKeyBatchBar" class="batch-bar hidden">
+              <span id="apiKeyBatchCount" class="batch-count"></span>
+              <button class="btn btn-primary btn-xs" data-apikey-batch="enable" data-i18n="batch.enable"></button>
+              <button class="btn btn-secondary btn-xs" data-apikey-batch="disable" data-i18n="batch.disable"></button>
+              <button class="btn btn-secondary btn-xs" data-apikey-batch="reset" data-i18n="apiKeys.actionReset"></button>
+              <button class="btn btn-danger btn-xs" data-apikey-batch="delete" data-i18n="batch.delete"></button>
+            </div>
+            <div class="toolbar-spacer"></div>
+            <input type="text" id="apiKeySearchInput" class="w-56!" data-i18n-placeholder="apiKeys.search" />
+            <select id="apiKeyStatusSelect" class="w-32!" data-i18n-aria-label="apiKeys.statusFilter">
+              <option value="all" data-i18n="filter.all"></option>
+              <option value="enabled" data-i18n="filter.enabled"></option>
+              <option value="disabled" data-i18n="filter.disabled"></option>
+              <option value="overLimit" data-i18n="apiKeys.filterOverLimit"></option>
+            </select>
+            <select id="apiKeySortSelect" class="w-36!" data-i18n-aria-label="apiKeys.sort">
+              <option value="created" data-i18n="apiKeys.sortCreated"></option>
+              <option value="lastUsed" data-i18n="apiKeys.sortLastUsed"></option>
+              <option value="tokens" data-i18n="apiKeys.sortTokens"></option>
+              <option value="credits" data-i18n="apiKeys.sortCredits"></option>
+              <option value="requests" data-i18n="apiKeys.sortRequests"></option>
+            </select>
+          </div>
           <div id="apiKeysList"></div>
         </div>
 

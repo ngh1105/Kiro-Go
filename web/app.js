@@ -734,12 +734,10 @@
     let html = '<div style="line-height:1.35;white-space:nowrap;">' +
       '<span>' + lab(t('logs.input')) + ' ' + formatNum(inT) + '</span> ' +
       '<span style="margin-left:6px;">' + lab(t('logs.output')) + ' ' + formatNum(outT) + '</span>';
-    if (cacheRead || cacheCreate) {
-      html += '<div style="font-size:0.72rem;opacity:0.7;">' +
-        '<span>' + lab(t('logs.cacheRead')) + ' ' + formatNum(cacheRead) + '</span> ' +
-        '<span style="margin-left:6px;">' + lab(t('logs.cacheCreation')) + ' ' + formatNum(cacheCreate) + '</span>' +
-        '</div>';
-    }
+    html += '<div style="font-size:0.72rem;opacity:0.7;">' +
+      '<span>' + lab(t('logs.cacheRead')) + ' ' + formatNum(cacheRead) + '</span> ' +
+      '<span style="margin-left:6px;">' + lab(t('logs.cacheCreation')) + ' ' + formatNum(cacheCreate) + '</span>' +
+      '</div>';
     html += '</div>';
     return html;
   }
@@ -750,15 +748,31 @@
     const summary = $('logsSummary');
     if (!list) return;
 
-    const total = logs.length;
-    const okCount = logs.filter(l => l.status === 'success').length;
+    // Summary reflects the currently-filtered view (A2): counts plus token/cache
+    // aggregates and a prompt-cache hit-rate = cacheRead / (input + cacheRead).
+    const filtered = logs.filter(l => logsFilter === 'all' || l.status === logsFilter);
+    const total = filtered.length;
+    const okCount = filtered.filter(l => l.status === 'success').length;
     const errCount = total - okCount;
+    let totIn = 0, totOut = 0, totCR = 0, totCW = 0;
+    for (const l of filtered) {
+      totIn += l.inputTokens || 0;
+      totOut += l.outputTokens || 0;
+      totCR += l.cacheRead || 0;
+      totCW += l.cacheCreation || 0;
+    }
+    const hitRate = (totIn + totCR) > 0 ? (totCR / (totIn + totCR) * 100) : 0;
     summary.innerHTML =
       '<span>' + escapeHtml(t('logs.total')) + ': <strong>' + total + '</strong></span>' +
       '<span>' + escapeHtml(t('logs.success')) + ': <strong>' + okCount + '</strong></span>' +
-      '<span>' + escapeHtml(t('logs.errors')) + ': <strong>' + errCount + '</strong></span>';
-
-    const filtered = logs.filter(l => logsFilter === 'all' || l.status === logsFilter);
+      '<span>' + escapeHtml(t('logs.errors')) + ': <strong>' + errCount + '</strong></span>' +
+      '<span class="logs-summary-sep"></span>' +
+      '<span>' + escapeHtml(t('logs.input')) + ': <strong>' + formatNum(totIn) + '</strong></span>' +
+      '<span>' + escapeHtml(t('logs.output')) + ': <strong>' + formatNum(totOut) + '</strong></span>' +
+      '<span>' + escapeHtml(t('logs.cacheRead')) + ': <strong>' + formatNum(totCR) + '</strong></span>' +
+      '<span>' + escapeHtml(t('logs.cacheCreation')) + ': <strong>' + formatNum(totCW) + '</strong></span>' +
+      '<span style="opacity:0.25;">|</span>' +
+      '<span>' + escapeHtml(t('logs.cacheHitRate')) + ': <strong>' + hitRate.toFixed(1) + '%</strong></span>';
 
     if (!filtered.length) {
       list.innerHTML = '<p class="text-muted">' + escapeHtml(t('logs.empty')) + '</p>';
@@ -1709,6 +1723,12 @@
   let apiKeyEditingId = '';
   let apiKeyModalSubmitting = false;
 
+  // B1/B3: client-side filter state + batch selection for API keys.
+  let apiKeySearch = '';
+  let apiKeyStatusFilter = 'all';
+  let apiKeySort = 'created';
+  const selectedApiKeys = new Set();
+
   async function loadApiKeys() {
     const list = $('apiKeysList');
     if (!list) return;
@@ -1748,7 +1768,123 @@
     if (!limit || limit <= 0) {
       return '<div class="text-xs muted-text">' + escapeHtml(label) + ': ' + escapeHtml(fmt(used)) + ' / ' + escapeHtml(t('apiKeys.unlimited')) + '</div>';
     }
-    return '<div class="text-xs muted-text">' + escapeHtml(label) + ': ' + escapeHtml(fmt(used)) + ' / ' + escapeHtml(fmt(limit)) + '</div>' + usageBar(used, limit);
+    // B2: surface the usage ratio explicitly next to used/limit.
+    const ratio = Math.max(0, Math.min(1, used / limit));
+    const pct = (ratio * 100).toFixed(0);
+    return '<div class="text-xs muted-text">' + escapeHtml(label) + ': ' + escapeHtml(fmt(used)) + ' / ' + escapeHtml(fmt(limit)) + ' (' + pct + '%)</div>' + usageBar(used, limit);
+  }
+
+  function isKeyOverLimit(k) {
+    return (k.tokenLimit > 0 && (k.tokensUsed || 0) >= k.tokenLimit) ||
+           (k.creditLimit > 0 && (k.creditsUsed || 0) >= k.creditLimit);
+  }
+
+  // B1: search (name / masked key prefix), status filter, and sort over the
+  // in-memory cache. Everything needed is already on the client.
+  function getFilteredApiKeys() {
+    let list = apiKeysCache.slice();
+    if (apiKeySearch) {
+      const kw = apiKeySearch.toLowerCase();
+      list = list.filter(k =>
+        (k.name || '').toLowerCase().includes(kw) ||
+        (k.keyMasked || '').toLowerCase().includes(kw));
+    }
+    if (apiKeyStatusFilter === 'enabled') list = list.filter(k => k.enabled);
+    else if (apiKeyStatusFilter === 'disabled') list = list.filter(k => !k.enabled);
+    else if (apiKeyStatusFilter === 'overLimit') list = list.filter(k => isKeyOverLimit(k));
+    const sortFns = {
+      created: (a, b) => (b.createdAt || 0) - (a.createdAt || 0),
+      lastUsed: (a, b) => (b.lastUsedAt || 0) - (a.lastUsedAt || 0),
+      tokens: (a, b) => (b.tokensUsed || 0) - (a.tokensUsed || 0),
+      credits: (a, b) => (b.creditsUsed || 0) - (a.creditsUsed || 0),
+      requests: (a, b) => (b.requestsCount || 0) - (a.requestsCount || 0)
+    };
+    list.sort(sortFns[apiKeySort] || sortFns.created);
+    return list;
+  }
+
+  function onApiKeyFilterChange() {
+    apiKeySearch = $('apiKeySearchInput') ? $('apiKeySearchInput').value : '';
+    apiKeyStatusFilter = $('apiKeyStatusSelect') ? $('apiKeyStatusSelect').value : 'all';
+    apiKeySort = $('apiKeySortSelect') ? $('apiKeySortSelect').value : 'created';
+    renderApiKeys();
+    updateApiKeyBatchBar();
+  }
+
+  // B3: batch selection (mirrors the accounts batch bar pattern).
+  function toggleSelectAllApiKeys(checked) {
+    const filtered = getFilteredApiKeys();
+    if (checked) filtered.forEach(k => selectedApiKeys.add(k.id));
+    else selectedApiKeys.clear();
+    renderApiKeys();
+    updateApiKeyBatchBar();
+  }
+  function toggleSelectApiKey(id) {
+    if (!id) return;
+    if (selectedApiKeys.has(id)) selectedApiKeys.delete(id);
+    else selectedApiKeys.add(id);
+    updateApiKeyBatchBar();
+  }
+  function updateApiKeyBatchBar() {
+    const bar = $('apiKeyBatchBar');
+    if (!bar) return;
+    const count = selectedApiKeys.size;
+    const cb = $('apiKeySelectAll');
+    if (cb) {
+      const filtered = getFilteredApiKeys();
+      const selFiltered = filtered.filter(k => selectedApiKeys.has(k.id)).length;
+      cb.checked = filtered.length > 0 && selFiltered === filtered.length;
+      cb.indeterminate = selFiltered > 0 && selFiltered < filtered.length;
+    }
+    if (count > 0) {
+      bar.classList.remove('hidden');
+      const cnt = $('apiKeyBatchCount');
+      if (cnt) cnt.textContent = String(count);
+    } else {
+      bar.classList.add('hidden');
+    }
+  }
+
+  // B3: loop the existing per-key endpoints client-side (no /batch route for keys).
+  async function apiKeyBatch(action) {
+    const ids = Array.from(selectedApiKeys);
+    if (!ids.length) return;
+    const confirmKey = action === 'delete' ? 'apiKeys.batchConfirmDelete'
+      : action === 'reset' ? 'apiKeys.batchConfirmReset'
+      : 'apiKeys.batchConfirm' + action.charAt(0).toUpperCase() + action.slice(1);
+    const ok = await confirmAction(t(confirmKey, ids.length), {
+      title: t('common.confirm'),
+      confirmText: t('common.confirm'),
+      variant: (action === 'delete' || action === 'disable') ? 'danger' : 'primary'
+    });
+    if (!ok) return;
+    const dismiss = toast(t('batch.processing'), 'info', { duration: 0 });
+    let succeeded = 0, failed = 0;
+    for (const id of ids) {
+      try {
+        let res;
+        if (action === 'enable' || action === 'disable') {
+          res = await api('/api-keys/' + encodeURIComponent(id), { method: 'PUT', body: JSON.stringify({ enabled: action === 'enable' }) });
+        } else if (action === 'reset') {
+          res = await api('/api-keys/' + encodeURIComponent(id) + '/reset-usage', { method: 'POST' });
+        } else if (action === 'delete') {
+          res = await api('/api-keys/' + encodeURIComponent(id), { method: 'DELETE' });
+        } else {
+          failed++; continue;
+        }
+        const d = await res.json().catch(() => ({}));
+        if (res && res.ok && d.success !== false) succeeded++; else failed++;
+      } catch { failed++; }
+    }
+    dismiss();
+    const resultKey = action === 'delete' ? 'batch.deleteResult'
+      : action === 'reset' ? 'apiKeys.batchResetResult'
+      : action === 'enable' ? 'apiKeys.batchEnableResult'
+      : 'apiKeys.batchDisableResult';
+    toast(t(resultKey, succeeded, failed), failed ? 'warning' : 'success');
+    selectedApiKeys.clear();
+    updateApiKeyBatchBar();
+    await loadApiKeys();
   }
 
   function renderApiKeys() {
@@ -1758,8 +1894,15 @@
       list.innerHTML = '<div class="muted-text" style="padding:0.5rem 0;">' + escapeHtml(t('apiKeys.empty')) + '</div>';
       return;
     }
-    const html = apiKeysCache.map(item => {
-      const id = escapeAttr(item.id || '');
+    const filtered = getFilteredApiKeys();
+    if (!filtered.length) {
+      list.innerHTML = '<div class="muted-text" style="padding:0.5rem 0;">' + escapeHtml(t('apiKeys.noMatches')) + '</div>';
+      return;
+    }
+    const html = filtered.map(item => {
+      const rawId = item.id || '';
+      const id = escapeAttr(rawId);
+      const isSelected = selectedApiKeys.has(rawId);
       const name = item.name ? escapeHtml(item.name) : '<span class="muted-text">' + escapeHtml(t('apiKeys.unnamed')) + '</span>';
       const masked = escapeHtml(item.keyMasked || '');
       const migrated = item.migrated
@@ -1771,9 +1914,11 @@
       const tokensLine = usageLine(t('apiKeys.tokens'), item.tokensUsed || 0, item.tokenLimit || 0);
       const creditsLine = usageLine(t('apiKeys.credits'), item.creditsUsed || 0, item.creditLimit || 0);
       const requestsLine = '<div class="text-xs muted-text">' + escapeHtml(t('apiKeys.requests')) + ': ' + escapeHtml(formatNumber(item.requestsCount || 0)) + '</div>';
+      const selectLabel = t('apiKeys.selectKey', item.name || t('apiKeys.unnamed'));
       return '<div class="card" data-apikey-id="' + id + '" style="margin-top:0.5rem;padding:0.75rem;">' +
         '<div class="flex items-center gap-2" style="flex-wrap:wrap;justify-content:space-between;">' +
           '<div class="flex items-center gap-2" style="flex-wrap:wrap;">' +
+            '<input type="checkbox" class="apikey-checkbox" ' + (isSelected ? 'checked' : '') + ' data-apikey-select="' + id + '" aria-label="' + escapeAttr(selectLabel) + '" />' +
             '<span class="font-semibold">' + name + '</span>' +
             migrated +
             disabled +
@@ -1960,14 +2105,28 @@
       });
       list.addEventListener('change', e => {
         const cb = e.target.closest('input[data-apikey-action="toggle"]');
-        if (!cb) return;
-        const id = cb.dataset.id;
-        if (!id) return;
-        toggleApiKeyEntry(id, cb.checked);
+        if (cb) {
+          const id = cb.dataset.id;
+          if (id) toggleApiKeyEntry(id, cb.checked);
+          return;
+        }
+        // B3: per-key batch selection checkbox.
+        const sel = e.target.closest('input.apikey-checkbox');
+        if (sel) toggleSelectApiKey(sel.dataset.apikeySelect);
       });
     }
     const addBtn = $('addApiKeyBtn');
     if (addBtn) addBtn.addEventListener('click', () => openApiKeyModal(null));
+    // B1/B3 controls.
+    const selectAll = $('apiKeySelectAll');
+    if (selectAll) selectAll.addEventListener('change', e => toggleSelectAllApiKeys(e.target.checked));
+    qsa('[data-apikey-batch]').forEach(b => b.addEventListener('click', () => apiKeyBatch(b.dataset.apikeyBatch)));
+    const search = $('apiKeySearchInput');
+    if (search) search.addEventListener('input', onApiKeyFilterChange);
+    const statusSel = $('apiKeyStatusSelect');
+    if (statusSel) statusSel.addEventListener('change', onApiKeyFilterChange);
+    const sortSel = $('apiKeySortSelect');
+    if (sortSel) sortSel.addEventListener('change', onApiKeyFilterChange);
     const saveBtn = $('apiKeyModalSaveBtn');
     if (saveBtn) saveBtn.addEventListener('click', submitApiKeyModal);
     const cancelBtn = $('apiKeyModalCancelBtn');
