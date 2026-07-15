@@ -17,6 +17,7 @@
   const selectedAccounts = new Set();
   let filterKeyword = '';
   let filterStatus = 'all';
+  let filterTag = '';
   let privacyModeEnabled = true;
   let promptRules = [];
   let builderIdSession = '';
@@ -909,6 +910,7 @@
   async function loadAccounts() {
     const res = await api('/accounts');
     accountsData = await res.json();
+    rebuildTagFilterOptions();
     renderAccounts();
   }
 
@@ -918,6 +920,10 @@
       if (filterStatus === 'enabled' && !a.enabled) return false;
       if (filterStatus === 'disabled' && (a.enabled || (a.banStatus && a.banStatus !== 'ACTIVE'))) return false;
       if (filterStatus === 'banned' && (!a.banStatus || a.banStatus === 'ACTIVE')) return false;
+      if (filterTag) {
+        const tags = Array.isArray(a.tags) ? a.tags : [];
+        if (!tags.includes(filterTag)) return false;
+      }
       if (filterKeyword) {
         const kw = filterKeyword.toLowerCase();
         if (!(a.email || '').toLowerCase().includes(kw)) return false;
@@ -925,9 +931,26 @@
       return true;
     });
   }
+  // C4: rebuild the tag filter <select> options from the union of all account tags.
+  function rebuildTagFilterOptions() {
+    const sel = $('filterTagSelect');
+    if (!sel) return;
+    const tagSet = new Set();
+    for (const a of accountsData) {
+      if (Array.isArray(a.tags)) a.tags.forEach(tg => { if (tg) tagSet.add(tg); });
+    }
+    const tags = Array.from(tagSet).sort((x, y) => x.localeCompare(y));
+    let html = '<option value="">' + escapeHtml(t('filter.allTags')) + '</option>';
+    for (const tg of tags) html += '<option value="' + escapeAttr(tg) + '">' + escapeHtml(tg) + '</option>';
+    sel.innerHTML = html;
+    sel.value = tags.includes(filterTag) ? filterTag : '';
+    if (sel.__customSelect) { renderCustomSelectOptions(sel); syncCustomSelect(sel); }
+  }
   function onFilterChange() {
     filterKeyword = $('filterSearch').value;
     filterStatus = $('filterStatusSelect').value;
+    const tagSel = $('filterTagSelect');
+    filterTag = tagSel ? tagSel.value : '';
     renderAccounts();
   }
   function toggleSelectAll(checked) {
@@ -1332,6 +1355,15 @@
       '<button class="btn btn-sm btn-primary" data-detail-action="saveProxyURL" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.save')) + '</button>' +
       '</div><p class="help-block">' + escapeHtml(t('detail.proxyHint')) + '</p></div>' +
 
+      // C4: tags editor — comma/whitespace separated; saves as array via PUT /accounts/{id}.
+      '<div class="detail-section"><h4>' + escapeHtml(t('detail.tags')) + '</h4>' +
+      '<div class="form-group">' +
+      '<input type="text" id="tagsInput" value="' + escapeAttr((Array.isArray(a.tags) ? a.tags : []).join(', ')) + '" placeholder="tag1, tag2" />' +
+      '<small>' + escapeHtml(t('detail.tagsHint')) + '</small>' +
+      '</div>' +
+      '<button class="btn btn-sm btn-primary" data-detail-action="saveTags" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.save')) + '</button>' +
+      '</div>' +
+
       '<div class="detail-section"><h4>' + escapeHtml(t('detail.subscription')) + '</h4><div class="detail-grid">' +
       detailItem(t('detail.subscriptionType'), a.subscriptionTitle || (a.subscriptionType ? formatSubscriptionLabel(a.subscriptionType) : '-')) +
       detailItem(t('detail.tokenExpiry'), a.expiresAt ? new Date(a.expiresAt * 1000).toLocaleString() : '-') +
@@ -1536,6 +1568,11 @@
     }
     await putAccount(id, { proxyURL: url }, t('detail.proxySaved'));
   }
+  // C4: save tags — split on comma/whitespace, drop empties, PUT /accounts/{id} with {tags:[...]}.
+  async function saveTags(id) {
+    const tags = ($('tagsInput').value || '').split(/[,\s]+/).map(s => s.trim()).filter(s => s.length > 0);
+    await putAccount(id, { tags }, t('detail.saved'));
+  }
   function closeDetailModal() { closeDialog('detailModal'); }
 
   // Test flow
@@ -1681,6 +1718,16 @@
     $('allowOverUsage').checked = d.allowOverUsage || false;
     const maxPayloadEl = document.getElementById('maxPayloadBytes');
     if (maxPayloadEl) maxPayloadEl.value = String(d.maxPayloadBytes || 2000000);
+    // D2: read rate-limit fields.
+    const rlRpm = document.getElementById('rateLimitRpm');
+    if (rlRpm) rlRpm.value = String(d.rateLimitRpm || 0);
+    const rlPerKey = document.getElementById('rateLimitPerKeyRpm');
+    if (rlPerKey) rlPerKey.value = String(d.rateLimitPerKeyRpm || 0);
+    const rlBurst = document.getElementById('rateLimitBurstSeconds');
+    if (rlBurst) rlBurst.value = String(d.rateLimitBurstSeconds || 0);
+    // D3: read webhook URL.
+    const whUrl = document.getElementById('webhookUrl');
+    if (whUrl) whUrl.value = d.webhookUrl || '';
     await Promise.all([loadThinkingConfig(), loadEndpointConfig(), loadProxyConfig(), loadPromptFilter(), loadApiKeys()]);
     refreshCustomSelects();
   }
@@ -1790,6 +1837,20 @@
     const maxPayloadBytes = maxPayloadEl ? parseInt(maxPayloadEl.value || '0', 10) : 0;
     await api('/settings', { method: 'POST', body: JSON.stringify({ allowOverUsage, maxPayloadBytes }) });
     toast(t('settings.overUsageSaved'), 'success');
+  }
+  // D2: save rate-limit settings (send ALL 3; 0 = unlimited). Persists but applies on next restart.
+  async function saveRateLimitConfig() {
+    const rateLimitRpm = parseInt(($('rateLimitRpm').value || '0'), 10) || 0;
+    const rateLimitPerKeyRpm = parseInt(($('rateLimitPerKeyRpm').value || '0'), 10) || 0;
+    const rateLimitBurstSeconds = parseInt(($('rateLimitBurstSeconds').value || '0'), 10) || 0;
+    await api('/settings', { method: 'POST', body: JSON.stringify({ rateLimitRpm, rateLimitPerKeyRpm, rateLimitBurstSeconds }) });
+    toast(t('settings.rateLimitSaved'), 'success');
+  }
+  // D3: save webhook URL.
+  async function saveWebhookConfig() {
+    const webhookUrl = $('webhookUrl').value.trim();
+    await api('/settings', { method: 'POST', body: JSON.stringify({ webhookUrl }) });
+    toast(t('settings.webhookSaved'), 'success');
   }
   async function changePassword() {
     const np = $('newPassword').value;
@@ -2047,6 +2108,41 @@
     list.innerHTML = html;
   }
 
+  // B5: render the per-model usage breakdown table inside the key modal.
+  function renderApiKeyUsageByModel(entry) {
+    const section = $('apiKeyForm_usageByModel');
+    const body = $('apiKeyForm_usageByModelBody');
+    if (!section || !body) return;
+    const map = entry && entry.usageByModel ? entry.usageByModel : null;
+    if (!map || Object.keys(map).length === 0) {
+      section.classList.add('hidden');
+      body.innerHTML = '';
+      return;
+    }
+    section.classList.remove('hidden');
+    const rows = Object.entries(map).sort((a, b) => (b[1].requests || 0) - (a[1].requests || 0));
+    let html = '<table style="width:100%;font-size:0.8rem;border-collapse:collapse;">';
+    html += '<thead><tr>' +
+      '<th style="text-align:left;">' + escapeHtml(t('apiKeys.model')) + '</th>' +
+      '<th style="text-align:right;">' + escapeHtml(t('apiKeys.requests')) + '</th>' +
+      '<th style="text-align:right;">' + escapeHtml(t('apiKeys.tokens')) + '</th>' +
+      '<th style="text-align:right;">' + escapeHtml(t('apiKeys.credits')) + '</th>' +
+      '</tr></thead><tbody>';
+    for (const [model, u] of rows) {
+      html += '<tr>' +
+        '<td style="text-align:left;">' + escapeHtml(model) + '</td>' +
+        '<td style="text-align:right;">' + escapeHtml(formatNumber(u.requests || 0)) + '</td>' +
+        '<td style="text-align:right;">' + escapeHtml(formatNumber(u.tokens || 0)) + '</td>' +
+        '<td style="text-align:right;">' + escapeHtml(formatNumber(u.credits || 0)) + '</td>' +
+        '</tr>';
+    }
+    html += '</tbody></table>';
+    body.innerHTML = html;
+  }
+  // B7: parse comma/newline-separated IPs/CIDRs into a clean array.
+  function parseAllowedIPs(text) {
+    return (text || '').split(/[,\n\r]/).map(s => s.trim()).filter(s => s.length > 0);
+  }
   function openApiKeyModal(entry) {
     apiKeyEditingId = entry ? (entry.id || '') : '';
     const titleEl = $('apiKeyModalTitle');
@@ -2063,6 +2159,11 @@
     $('apiKeyForm_enabled').checked = entry ? !!entry.enabled : true;
     $('apiKeyForm_tokenLimit').value = entry ? String(entry.tokenLimit || 0) : '0';
     $('apiKeyForm_creditLimit').value = entry ? String(entry.creditLimit || 0) : '0';
+    // B7: populate allowedIPs textarea from entry.
+    const allowedIPsEl = $('apiKeyForm_allowedIPs');
+    if (allowedIPsEl) allowedIPsEl.value = entry && Array.isArray(entry.allowedIPs) ? entry.allowedIPs.join(', ') : '';
+    // B5: per-model usage breakdown (edit/view only).
+    renderApiKeyUsageByModel(entry);
     apiKeyModalSubmitting = false;
     $('apiKeyModalSaveBtn').disabled = false;
     openDialog('apiKeyModal');
@@ -2089,7 +2190,8 @@
         name: name,
         enabled: enabled,
         tokenLimit: isNaN(tokenLimit) || tokenLimit < 0 ? 0 : tokenLimit,
-        creditLimit: isNaN(creditLimit) || creditLimit < 0 ? 0 : creditLimit
+        creditLimit: isNaN(creditLimit) || creditLimit < 0 ? 0 : creditLimit,
+        allowedIPs: parseAllowedIPs($('apiKeyForm_allowedIPs') ? $('apiKeyForm_allowedIPs').value : '')
       };
       let res, d;
       if (apiKeyEditingId) {
@@ -3457,6 +3559,8 @@
 
     $('filterSearch').addEventListener('input', onFilterChange);
     $('filterStatusSelect').addEventListener('change', onFilterChange);
+    const filterTagSelectEl = $('filterTagSelect');
+    if (filterTagSelectEl) filterTagSelectEl.addEventListener('change', onFilterChange);
 
     $('accountsList').addEventListener('click', e => {
       const cb = e.target.closest('.account-checkbox');
@@ -3488,6 +3592,10 @@
     $('proxyType').addEventListener('change', onProxyTypeChange);
     $('saveProxyBtn').addEventListener('click', saveProxyConfig);
     $('resetStatsBtn').addEventListener('click', resetStats);
+    const saveRateLimitBtnEl = $('saveRateLimitBtn');
+    if (saveRateLimitBtnEl) saveRateLimitBtnEl.addEventListener('click', saveRateLimitConfig);
+    const saveWebhookBtnEl = $('saveWebhookBtn');
+    if (saveWebhookBtnEl) saveWebhookBtnEl.addEventListener('click', saveWebhookConfig);
     bindApiKeyEvents();
   }
 
@@ -3549,6 +3657,7 @@
       else if (a === 'toggleOverage') toggleOverageSwitch(id, b);
       else if (a === 'refreshOverage') refreshAccountOverage(id);
       else if (a === 'saveProxyURL') saveProxyURL(id);
+      else if (a === 'saveTags') saveTags(id);
       else if (a === 'loadModels') loadModels(id);
       else if (a === 'refreshModels') refreshAccountModels(id);
     });
