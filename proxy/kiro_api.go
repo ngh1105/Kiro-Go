@@ -217,6 +217,58 @@ func apiKeyProbeFatal(err error) bool {
 		strings.Contains(msg, "HTTP 403")
 }
 
+// refreshApiKeyInfoWithRegionProbe probes apiKeyRegionCandidates(hintRegion) in
+// order, returning the usage response + the region that worked. For each
+// candidate it builds a throwaway shallow copy of account pinned to that region
+// (copy.ApiRegion = candidate, the highest-priority key in EffectiveApiRegion)
+// and calls the existing GetUsageLimits(&copy). Stop conditions:
+//   - 200              → HIT (return usage, candidate, nil)
+//   - apiKeyProbeFatal → key bad / payment → STOP (return nil, "", err)
+//   - 404 / 5xx / net  → wrong region or transient → next candidate
+//
+// Returns the last error when the list is exhausted (caller falls back to the
+// hint/default region). Read-only: it does NOT persist and does NOT mutate the
+// input account (only the per-region local copy).
+func refreshApiKeyInfoWithRegionProbe(account *config.Account, hintRegion string) (*UsageLimitsResponse, string, error) {
+	var lastErr error
+	for _, region := range apiKeyRegionCandidates(hintRegion) {
+		probe := *account // shallow copy; GetUsageLimits is read-only for api_key
+		probe.ApiRegion = region
+		probe.Region = region
+		usage, err := GetUsageLimits(&probe)
+		if err == nil {
+			return usage, region, nil
+		}
+		if apiKeyProbeFatal(err) {
+			return nil, "", err
+		}
+		lastErr = err
+	}
+	return nil, "", lastErr
+}
+
+// refreshApiKeyAccountWithRegionDetection is the single-import helper: probe the
+// api_key's region; if a region different from the account's is detected, persist
+// it and return regionChanged=true so the caller can reload its pool. Then run the
+// best-effort RefreshAccountInfo. Best-effort + async-safe: a probe failure leaves
+// the account with its original region. The caller MUST run this in a goroutine
+// (it makes upstream calls).
+func refreshApiKeyAccountWithRegionDetection(account *config.Account) (info *config.AccountInfo, regionChanged bool, err error) {
+	if account != nil {
+		if _, detected, probeErr := refreshApiKeyInfoWithRegionProbe(account, account.Region); probeErr == nil && detected != "" && detected != account.Region {
+			account.Region = detected
+			account.ApiRegion = detected
+			if updateErr := config.UpdateAccount(account.ID, *account); updateErr != nil {
+				logger.Warnf("[ApiKeyRegion] failed to persist detected region %s for %s: %v", detected, accountEmailForLog(account), updateErr)
+			} else {
+				regionChanged = true
+			}
+		}
+	}
+	info, err = RefreshAccountInfo(account)
+	return info, regionChanged, err
+}
+
 // GetUsageLimits 获取账户使用量和订阅信息
 func GetUsageLimits(account *config.Account) (*UsageLimitsResponse, error) {
 	if err := ensureRestProfileArn(account); err != nil {

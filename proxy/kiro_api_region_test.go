@@ -2,6 +2,9 @@ package proxy
 
 import (
 	"errors"
+	"io"
+	"net/http"
+	"strings"
 	"testing"
 
 	"kiro-go/config"
@@ -75,3 +78,87 @@ func TestApiKeyProbeFatal(t *testing.T) {
 // reference so the compiler sees config is used if candidates tests grow; keeps
 // the import honest without a blank identifier.
 var _ = config.Account{}
+
+// TestRefreshApiKeyInfoWithRegionProbeHit walks candidates until the eu-central-1
+// host returns 200, and asserts the input account is NOT mutated by the probe.
+func TestRefreshApiKeyInfoWithRegionProbeHit(t *testing.T) {
+	if err := config.Init(t.TempDir() + "/config.json"); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	kiroRestHttpStore.Store(&http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			code, body := http.StatusNotFound, "not found"
+			if req.URL.Host == "q.eu-central-1.amazonaws.com" {
+				code, body = 200, `{}`
+			}
+			return &http.Response{StatusCode: code, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+		}),
+	})
+	t.Cleanup(func() { InitKiroHttpClient("") })
+
+	acct := &config.Account{AuthMethod: "api_key", KiroApiKey: "KEY-XYZ", AccessToken: "KEY-XYZ", Region: "us-east-1"}
+	usage, region, err := refreshApiKeyInfoWithRegionProbe(acct, "us-east-1")
+	if err != nil {
+		t.Fatalf("expected hit, got err %v", err)
+	}
+	if region != "eu-central-1" {
+		t.Fatalf("region: want eu-central-1, got %q", region)
+	}
+	if usage == nil {
+		t.Fatal("expected usage response, got nil")
+	}
+	if acct.Region != "us-east-1" || acct.ApiRegion != "" {
+		t.Fatalf("probe mutated input account: Region=%q ApiRegion=%q", acct.Region, acct.ApiRegion)
+	}
+}
+
+// TestRefreshApiKeyInfoWithRegionProbeStopsOnAuthError checks a 401 on the first
+// candidate stops the loop (no further regions probed).
+func TestRefreshApiKeyInfoWithRegionProbeStopsOnAuthError(t *testing.T) {
+	if err := config.Init(t.TempDir() + "/config.json"); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	var hits int
+	kiroRestHttpStore.Store(&http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			hits++
+			return &http.Response{StatusCode: http.StatusUnauthorized, Body: io.NopCloser(strings.NewReader("unauthorized")), Header: make(http.Header)}, nil
+		}),
+	})
+	t.Cleanup(func() { InitKiroHttpClient("") })
+
+	acct := &config.Account{AuthMethod: "api_key", KiroApiKey: "BAD", AccessToken: "BAD", Region: "us-east-1"}
+	_, _, err := refreshApiKeyInfoWithRegionProbe(acct, "us-east-1")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !apiKeyProbeFatal(err) {
+		t.Fatalf("expected fatal error, got %v", err)
+	}
+	if hits != 1 {
+		t.Fatalf("expected 1 probe hit (stop on 401), got %d", hits)
+	}
+}
+
+// TestRefreshApiKeyInfoWithRegionProbeAllMiss checks an all-404 sweep returns the
+// last error and an empty detected region.
+func TestRefreshApiKeyInfoWithRegionProbeAllMiss(t *testing.T) {
+	if err := config.Init(t.TempDir() + "/config.json"); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	kiroRestHttpStore.Store(&http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(strings.NewReader("nf")), Header: make(http.Header)}, nil
+		}),
+	})
+	t.Cleanup(func() { InitKiroHttpClient("") })
+
+	acct := &config.Account{AuthMethod: "api_key", KiroApiKey: "KEY", AccessToken: "KEY", Region: "us-east-1"}
+	_, region, err := refreshApiKeyInfoWithRegionProbe(acct, "")
+	if err == nil {
+		t.Fatal("expected error after all-404, got nil")
+	}
+	if region != "" {
+		t.Fatalf("region: want empty on miss, got %q", region)
+	}
+}
