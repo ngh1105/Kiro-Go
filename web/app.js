@@ -2347,7 +2347,7 @@
         }
       } catch (e) { /* not JSON — treat as plain text */ }
       if (!keys.trim()) { toast(t('apikeyBatch.keysMissing'), 'warning'); if (btn) btn.disabled = false; return; }
-      var res = await api('/auth/apikeys-batch', { method: 'POST', body: JSON.stringify({ keys: keys, region: 'us-east-1' }) });
+      var res = await api('/auth/apikeys-batch', { method: 'POST', body: JSON.stringify({ keys: keys }) });
       var d = await res.json();
       if (d.success) {
         closeDialog('apiKeyImportModal');
@@ -2754,7 +2754,7 @@
       '<div class="form-group"><label>' + escapeHtml(t('apikey.key')) + '</label>' +
       '<textarea id="apiKeyValue" class="font-mono" placeholder="' + escapeAttr(t('apikey.keyPlaceholder')) + '"></textarea>' +
       '</div>' +
-      '<div class="form-group"><label>' + escapeHtml(t('detail.region')) + '</label><input type="text" id="apiKeyRegion" value="us-east-1" /></div>' +
+      '<div class="form-group"><label>' + escapeHtml(t('detail.region')) + '</label><input type="text" id="apiKeyRegion" placeholder="' + escapeAttr(t('apikey.regionAuto')) + '" /><small class="muted-text">' + escapeHtml(t('apikey.regionHint')) + '</small></div>' +
       '<div class="modal-footer">' +
       '<button class="btn btn-secondary" data-modal-goto="add" type="button">' + escapeHtml(t('common.back')) + '</button>' +
       '<button class="btn btn-primary" id="importApiKeyBtn" type="button">' + escapeHtml(t('common.add')) + '</button>' +
@@ -2769,7 +2769,7 @@
       '<textarea id="apiKeyBatchValue" class="font-mono" rows="8" placeholder="' + escapeAttr(t('apikeyBatch.keysPlaceholder')) + '"></textarea>' +
       '<small>' + escapeHtml(t('apikeyBatch.onePerLine')) + '</small>' +
       '</div>' +
-      '<div class="form-group"><label>' + escapeHtml(t('detail.region')) + '</label><input type="text" id="apiKeyBatchRegion" value="us-east-1" /></div>' +
+      '<div class="form-group"><label>' + escapeHtml(t('detail.region')) + '</label><input type="text" id="apiKeyBatchRegion" placeholder="' + escapeAttr(t('apikey.regionAuto')) + '" /><small class="muted-text">' + escapeHtml(t('apikey.regionHint')) + '</small></div>' +
       '<div class="modal-footer">' +
       '<button class="btn btn-secondary" data-modal-goto="add" type="button">' + escapeHtml(t('common.back')) + '</button>' +
       '<button class="btn btn-primary" id="importApiKeyBatchBtn" type="button">' + escapeHtml(t('common.add')) + '</button>' +
@@ -2971,7 +2971,7 @@
   async function importApiKey() {
     const kiroApiKey = $('apiKeyValue').value.trim();
     if (!kiroApiKey) return toastWarning(t('apikey.keyMissing'));
-    const region = $('apiKeyRegion').value || 'us-east-1';
+    const region = $('apiKeyRegion').value.trim();
     const res = await api('/auth/credentials', { method: 'POST', body: JSON.stringify({ kiroApiKey, authMethod: 'api_key', region }) });
     const d = await res.json();
     if (d.success) {
@@ -2983,7 +2983,7 @@
   async function importApiKeysBatch() {
     const keys = $('apiKeyBatchValue').value.trim();
     if (!keys) return toastWarning(t('apikeyBatch.keysMissing'));
-    const region = $('apiKeyBatchRegion').value || 'us-east-1';
+    const region = $('apiKeyBatchRegion').value.trim();
     const res = await api('/auth/apikeys-batch', { method: 'POST', body: JSON.stringify({ keys, region }) });
     const d = await res.json();
     if (d.success) {

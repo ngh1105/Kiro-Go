@@ -252,6 +252,8 @@
   "apikey.keyPlaceholder": "在此粘贴 Kiro API 密钥",
   "apikey.keyMissing": "API 密钥不能为空",
   "apikey.importSuccess": "账号添加成功",
+  "apikey.regionAuto": "自动识别（留空）",
+  "apikey.regionHint": "留空将通过探测自动识别区域；输入区域将优先尝试该区域。",
   "apikeyBatch.hint": "每行一个密钥。重复项（已导入或本批次内重复）将被跳过。",
   "apikeyBatch.keys": "API 密钥",
   "apikeyBatch.keysPlaceholder": "每行一个密钥...",

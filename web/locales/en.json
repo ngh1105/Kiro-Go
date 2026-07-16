@@ -252,6 +252,8 @@
   "apikey.keyPlaceholder": "Paste the Kiro API key here",
   "apikey.keyMissing": "API key is required",
   "apikey.importSuccess": "Account added",
+  "apikey.regionAuto": "Auto-detect (leave empty)",
+  "apikey.regionHint": "Leave empty to auto-detect the region by probing. Type a region to try it first.",
   "apikeyBatch.hint": "One key per line. Duplicates (already imported or repeated in this batch) are skipped.",
   "apikeyBatch.keys": "API Keys",
   "apikeyBatch.keysPlaceholder": "one-key-per-line...",
