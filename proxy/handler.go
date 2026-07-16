@@ -2669,6 +2669,20 @@ func (h *Handler) apiAddAccount(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.pool.Reload()
+	// api_key: best-effort region detection + usage refresh (async). The probe
+	// persists a detected region and reloads the pool; a failure leaves the
+	// account with the user's region (or us-east-1 default).
+	if account.IsApiKeyCredential() {
+		go func(acc config.Account) {
+			_, regionChanged, infoErr := refreshApiKeyAccountWithRegionDetection(&acc)
+			if regionChanged {
+				h.pool.Reload()
+			}
+			if infoErr != nil {
+				logger.Warnf("[AddAccount] RefreshAccountInfo failed for api_key account %s: %v", accountEmailForLog(&acc), infoErr)
+			}
+		}(account)
+	}
 	// 新账号若已启用且有 token，立即拉取并缓存模型列表
 	if account.Enabled && (account.AccessToken != "" || account.IsApiKeyCredential()) {
 		go func(acc config.Account) {
@@ -3520,7 +3534,11 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		// uses KiroApiKey (mirrored into AccessToken) as the bearer via
 		// applyKiroBaseHeaders; profile-ARN resolution is skipped for api_key.
 		go func(acc config.Account) {
-			if _, infoErr := RefreshAccountInfo(&acc); infoErr != nil {
+			_, regionChanged, infoErr := refreshApiKeyAccountWithRegionDetection(&acc)
+			if regionChanged {
+				h.pool.Reload()
+			}
+			if infoErr != nil {
 				logger.Warnf("[Import] RefreshAccountInfo failed for api_key account %s: %v", accountEmailForLog(&acc), infoErr)
 			}
 		}(account)
