@@ -160,6 +160,63 @@ func shouldProbeFallbackRegions(account *config.Account) bool {
 	return strings.EqualFold(method, "external_idp") || strings.EqualFold(method, "idc")
 }
 
+// defaultApiKeyRegions is the ordered set probed when an api_key's region is
+// unknown. The hint region supplied by the caller is always tried first (see
+// apiKeyRegionCandidates); this list follows. Override or replace with the
+// KIRO_APIKEY_REGIONS env var (comma-separated).
+var defaultApiKeyRegions = []string{
+	"us-east-1", "us-east-2", "us-west-2",
+	"eu-central-1", "eu-west-1", "eu-west-2",
+	"ap-south-1", "ap-southeast-1", "ap-southeast-2",
+	"ap-northeast-1", "ap-northeast-2",
+	"ca-central-1", "il-central-1",
+}
+
+// apiKeyRegionCandidates returns the ordered, de-duplicated region list to probe
+// for an api_key import. hintRegion is tried first (the user's guess, or the
+// prior default). KIRO_APIKEY_REGIONS, when set, replaces the built-in list;
+// otherwise defaultApiKeyRegions is used. Mirrors kiroProfileRegionCandidates'
+// dedup style.
+func apiKeyRegionCandidates(hintRegion string) []string {
+	seen := make(map[string]bool)
+	var out []string
+	add := func(region string) {
+		region = strings.TrimSpace(region)
+		if region == "" || seen[region] {
+			return
+		}
+		seen[region] = true
+		out = append(out, region)
+	}
+	add(hintRegion)
+	if env := strings.TrimSpace(os.Getenv("KIRO_APIKEY_REGIONS")); env != "" {
+		for _, r := range strings.Split(env, ",") {
+			add(r)
+		}
+		return out
+	}
+	for _, r := range defaultApiKeyRegions {
+		add(r)
+	}
+	return out
+}
+
+// apiKeyProbeFatal reports whether a GetUsageLimits probe error means the key
+// itself is unusable (auth failure or payment), so the region loop must STOP
+// rather than try another region. Distinguished by the HTTP status embedded in
+// GetUsageLimits's error ("HTTP %d: ..."): 401/402/403 → fatal; 404 and
+// everything else → wrong region or transient, continue. Do NOT reuse
+// isAuthErrorMessage — its word-list is broader and wrong for this narrow status.
+func apiKeyProbeFatal(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "HTTP 401") ||
+		strings.Contains(msg, "HTTP 402") ||
+		strings.Contains(msg, "HTTP 403")
+}
+
 // GetUsageLimits 获取账户使用量和订阅信息
 func GetUsageLimits(account *config.Account) (*UsageLimitsResponse, error) {
 	if err := ensureRestProfileArn(account); err != nil {
