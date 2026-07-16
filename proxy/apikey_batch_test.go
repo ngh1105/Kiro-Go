@@ -132,3 +132,34 @@ func TestApiImportApiKeysRejectsEmpty(t *testing.T) {
 		t.Fatalf("expected 400 for empty keys, got %d", rec.Code)
 	}
 }
+
+// TestImportApiKeysDetectsBatchRegion verifies the first-key probe detects the
+// batch region and applies it to every persisted account. Only the eu-central-1
+// host returns 200; us-east-1 (the hint) 404s, so detection must fall back to
+// eu-central-1.
+func TestImportApiKeysDetectsBatchRegion(t *testing.T) {
+	if err := config.Init(t.TempDir() + "/config.json"); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	kiroRestHttpStore.Store(&http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			code, body := http.StatusNotFound, "not found"
+			if req.URL.Host == "q.eu-central-1.amazonaws.com" {
+				code, body = 200, `{}`
+			}
+			return &http.Response{StatusCode: code, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+		}),
+	})
+	t.Cleanup(func() { InitKiroHttpClient("") })
+
+	h := &Handler{pool: accountpool.GetPool()}
+	summary := h.ImportApiKeys("KEY-A-1234567890\nKEY-B-1234567890", "us-east-1", "", "")
+	if summary.Imported != 2 {
+		t.Fatalf("imported: want 2, got %d", summary.Imported)
+	}
+	for _, a := range config.GetAccounts() {
+		if a.Region != "eu-central-1" {
+			t.Fatalf("account %s Region: want eu-central-1, got %q", a.ID, a.Region)
+		}
+	}
+}

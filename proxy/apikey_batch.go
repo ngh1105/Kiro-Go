@@ -10,6 +10,24 @@ import (
 	"kiro-go/logger"
 )
 
+// firstImportableApiKeyKey returns the first non-empty, non-duplicate key in
+// rawText, used as the batch region probe. Duplicates already present in existing
+// and repeats within rawText are skipped. Returns "" when there is no importable
+// key. This is a focused early-out scan; it does not replicate the create loop's
+// per-key create/refresh/async work.
+func firstImportableApiKeyKey(rawText string, existing map[string]bool) string {
+	seenInBatch := make(map[string]bool)
+	for _, raw := range strings.Split(rawText, "\n") {
+		key := strings.TrimSpace(raw)
+		if key == "" || existing[key] || seenInBatch[key] {
+			continue
+		}
+		seenInBatch[key] = true
+		return key
+	}
+	return ""
+}
+
 // ApiKeyImportResult is the per-key outcome of a bulk API-key import.
 type ApiKeyImportResult struct {
 	MaskedKey    string  `json:"maskedKey"`
@@ -61,6 +79,21 @@ func (h *Handler) ImportApiKeys(rawText, region, authRegion, apiRegion string) A
 
 	if region == "" {
 		region = "us-east-1"
+	}
+
+	// Probe-once-per-batch: detect the batch region from the first importable key.
+	// Read-only; the probe account is thrown away (no persist, no double-create).
+	// On HIT override region with the detected one; on failure keep the hint/default.
+	if first := firstImportableApiKeyKey(rawText, existing); first != "" {
+		probeAccount := config.Account{
+			AuthMethod:  "api_key",
+			KiroApiKey:  first,
+			AccessToken: first,
+			MachineId:   config.GenerateMachineId(),
+		}
+		if _, detected, err := refreshApiKeyInfoWithRegionProbe(&probeAccount, region); err == nil && detected != "" {
+			region = detected
+		}
 	}
 
 	for _, raw := range strings.Split(rawText, "\n") {
