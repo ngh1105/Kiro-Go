@@ -78,37 +78,30 @@ env override (comma-separated, when set) or `defaultApiKeyRegions`, dedup preser
 ### 3. The probe loop (new) — `proxy/kiro_api.go`
 
 ```go
-// apiKeyUsageProbe probes ONE candidate region against an api_key account and returns
-// the usage response (nil + HTTP-status error on non-200). This is the testable seam:
-// production wires it to defaultApiKeyProbe; unit tests inject a fake returning canned
-// per-region results. kiroRestAPIBase is a const and regionalizeURLForRegion only
-// rewrites *.amazonaws.com hosts, so the real GET can never target an httptest
-// localhost server — the seam is what makes the loop unit-testable without network.
-type apiKeyUsageProbe func(account *config.Account, region string) (*UsageLimitsResponse, error)
+// apiKeyProbeFatal reports whether a probe error means the key itself is unusable
+// (auth failure or payment), so the loop must STOP rather than try another region.
+// Distinguish by the HTTP status embedded in GetUsageLimits's error ("HTTP %d: ..."):
+// 401/403/402 → fatal (key/payment); 404 and everything else → wrong region, continue.
+// Do NOT reuse isAuthErrorMessage — its word-list is broader and wrong for this
+// narrow status signal.
+func apiKeyProbeFatal(err error) bool
 
-// defaultApiKeyProbe pins a throwaway shallow copy of account to `region`
-// (ApiRegion + Region — the highest-priority keys in EffectiveApiRegion) and calls the
-// existing GetUsageLimits. Read-only; GetUsageLimits does not mutate its argument for
-// api_key (ensureRestProfileArn short-circuits), so the original account is untouched.
-func defaultApiKeyProbe(account *config.Account, region string) (*UsageLimitsResponse, error)
-
-// refreshApiKeyInfoWithRegionProbeFn is the testable core. It iterates
-// apiKeyRegionCandidates(hintRegion), invoking probe per region. Stop conditions:
-//   - probe nil-error → HIT (return usage, candidate, nil)
-//   - apiKeyProbeFatal(err) → key bad / payment → STOP (return nil, "", err)
-//   - otherwise (404 / 5xx / network) → wrong region or transient → next candidate
-// Returns the last error when the list is exhausted. Does not mutate `account`.
-func refreshApiKeyInfoWithRegionProbeFn(account *config.Account, hintRegion string, probe apiKeyUsageProbe) (*UsageLimitsResponse, string, error)
-
-// refreshApiKeyInfoWithRegionProbe is the production wrapper (probe = defaultApiKeyProbe).
+// refreshApiKeyInfoWithRegionProbe probes apiKeyRegionCandidates(hintRegion) in order.
+// For each candidate it builds a throwaway shallow copy of account pinned to that
+// region (copy.ApiRegion = candidate, so EffectiveApiRegion resolves to it) and calls
+// the existing GetUsageLimits(&copy). Stop conditions:
+//   - 200               → HIT (return usage, candidate, nil)
+//   - apiKeyProbeFatal  → key bad / payment → STOP (return nil, "", err)
+//   - 404 / 5xx / net   → wrong region or transient → next candidate
+// Returns the last error when the list is exhausted (caller falls back to hint/default).
+// Does not mutate the input account.
 func refreshApiKeyInfoWithRegionProbe(account *config.Account, hintRegion string) (*UsageLimitsResponse, string, error)
 ```
 
-Status classification reuses the `HTTP %d:` error string from `GetUsageLimits`:
-- contains `HTTP 401` / `HTTP 403` / `HTTP 402` → stop (key/payment). Implement via a small
-  `apiKeyProbeFatal(err) bool` helper (string check on the wrapped error) — do **not** reuse
-  `isAuthErrorMessage`, whose word-list is broader and wrong for this narrow signal.
-- everything else (incl. 404) → next region.
+No injected seam: the loop calls the real `GetUsageLimits` on each per-region copy. It is
+unit-tested by stubbing `kiroRestHttpStore` with a transport that inspects `req.URL.Host`
+(see Testing) — `regionalizeURLForRegion` yields a distinct real host per region, so the
+stub can return 200 for the correct region and 404 for the others, exercising the real path.
 
 ### 4. Batch import — `proxy/apikey_batch.go` (`ImportApiKeys` @ :50)
 
@@ -116,12 +109,12 @@ Status classification reuses the `HTTP %d:` error string from `GetUsageLimits`:
 
 1. Parse + dedup keys as today. Build `importable` (non-duplicate keys).
 2. **Before** creating accounts: if there is at least one importable key, resolve the batch
-   region with a single probe sweep via `resolveBatchRegion(importable[0], region, refreshApiKeyInfoWithRegionProbe)`
-   (a free function in `apikey_batch.go`). It builds a throwaway probe account from the first
-   key and calls the resolver once; on HIT it returns the detected region, on failure it
-   falls back to the hint region (or `us-east-1`). `ImportApiKeys` then assigns that resolved
-   region to every account. The probe is read-only and throws away its account — no
-   persistence, no double-create.
+   region with a single probe sweep. Build a throwaway probe account from `importable[0]`
+   (`AuthMethod:"api_key"`, `KiroApiKey`=key, `AccessToken`=key) and call
+   `refreshApiKeyInfoWithRegionProbe(&probeAccount, region)` once. On HIT (`detected != ""`)
+   set `region = detected`; on probe failure keep the hint region (or `us-east-1`, defaulted
+   just above). The probe is read-only and throws away its account — no persistence, no
+   double-create. `importable[0]` is then created alongside the rest with the resolved region.
 3. Then create **all** accounts (including the first key) with the now-resolved `region`,
    exactly as today: `account.Region = region`, `RefreshAccountInfo(&account)` per key
    (single call, **no re-probe**), persist, async model-cache refresh.
@@ -199,26 +192,27 @@ import time (already a stored field). Env override `KIRO_APIKEY_REGIONS` is new 
 
 ## Testing
 
-The probe loop cannot be driven through an httptest server: `kiroRestAPIBase` is a `const`
-(`kiro_api.go:18`) and `regionalizeURLForRegion` only rewrites `*.amazonaws.com` hosts, so
-the real GET never targets localhost. Instead the loop takes an **injected probe function**;
-unit tests pass a fake that returns canned per-region results. The production wiring
-(`defaultApiKeyProbe` → `GetUsageLimits` on a throwaway copy) is verified by build + smoke,
-not by an isolated unit test.
+No injected seam: the loop calls the real `GetUsageLimits` on each per-region copy. The
+region is encoded in the request host (`codewhisperer.us-east-1.amazonaws.com` for us-east-1,
+`q.<region>.amazonaws.com` otherwise), so a unit test stubs `kiroRestHttpStore` with a
+`roundTripFunc` that inspects `req.URL.Host` and returns 200 for the target region's host /
+404 for the others — exercising the real region-resolution + host-rewrite path. This matches
+the existing `apikey_batch_test.go` and `kiro_region_test.go` conventions (no function-injection
+seam exists anywhere in the package).
 
-- Unit: `apiKeyRegionCandidates` — dedup, `KIRO_APIKEY_REGIONS` override, hint-first ordering.
+- Unit: `apiKeyRegionCandidates` — hint-first ordering, dedup, `KIRO_APIKEY_REGIONS` override.
 - Unit: `apiKeyProbeFatal` — 401/403/402 → true; 404/500/network → false.
-- Unit: `refreshApiKeyInfoWithRegionProbeFn` (injected probe) — HIT returns (usage, region, nil); 404 → continues to next; 401/403/402 → stops early; exhausted → last error. Assert the input account is not mutated.
-- Unit: `resolveBatchRegion` (injected resolver) — HIT → detected region; failure + hint → hint; failure + no hint → `us-east-1`; resolver invoked exactly once.
-- Build + smoke: `ImportApiKeys`, `apiImportCredentials`, `apiAddAccount` wiring against a real upstream.
+- Unit: `refreshApiKeyInfoWithRegionProbe` (stubbed `kiroRestHttpStore`) — HIT returns (usage, region, nil); 404 → continues to next region; 401/403/402 → stops early (only one host hit); all-404 → last error. Assert the input account is not mutated (its Region/ApiRegion unchanged).
+- Unit: `ImportApiKeys` (stubbed `kiroRestHttpStore`, 200 for `q.eu-central-1.amazonaws.com` only) — persisted accounts get `Region == "eu-central-1"`; probe makes one sweep regardless of batch size.
+- Build + smoke: single-import wiring (`apiImportCredentials`, `apiAddAccount`) against a real upstream.
 
 ## Files touched
 
 | File | Change |
 |---|---|
-| `proxy/kiro_api.go` | `defaultApiKeyRegions`, `apiKeyRegionCandidates`, `apiKeyUsageProbe` type, `defaultApiKeyProbe`, `refreshApiKeyInfoWithRegionProbeFn` + `refreshApiKeyInfoWithRegionProbe`, `apiKeyProbeFatal` — reuses existing `GetUsageLimits` |
-| `proxy/apikey_batch.go` | `apiKeyRegionResolver` type, `resolveBatchRegion`; `ImportApiKeys` probe-once-per-batch before account creation |
-| `proxy/handler.go` | `apiAddAccount` + `apiImportCredentials` api_key branches: single-key probe (async) |
-| `web/app.js` | region inputs optional (single `modalApiKey`, batch `modalApiKeyBatch`); B4 import omits `region` |
+| `proxy/kiro_api.go` | `defaultApiKeyRegions`, `apiKeyRegionCandidates`, `apiKeyProbeFatal`, `refreshApiKeyInfoWithRegionProbe`, `refreshApiKeyAccountWithRegionDetection` (single-import helper) — reuses existing `GetUsageLimits` |
+| `proxy/apikey_batch.go` | `ImportApiKeys`: split into parse/dedup pass → probe-once-per-batch → create pass |
+| `proxy/handler.go` | `apiImportCredentials` + `apiAddAccount` api_key branches: call `refreshApiKeyAccountWithRegionDetection` async |
+| `web/app.js` | region inputs optional (single `modalApiKey`, batch `modalApiKeyBatch`); B4 `importApiKeysSubmit` omits `region` |
 | `web/locales/en.json`, `web/locales/zh.json` | `apikey.regionAuto`, `apikey.regionHint` |
-| `proxy/kiro_api_region_test.go` (new) + `proxy/apikey_batch_test.go` | unit tests: candidates, fatal classifier, probe loop (injected), resolveBatchRegion (injected) |
+| `proxy/kiro_api_region_test.go` (new) + `proxy/apikey_batch_test.go` | unit tests: candidates, fatal classifier, probe loop (stubbed store), ImportApiKeys region detection |
