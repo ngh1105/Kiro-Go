@@ -207,3 +207,44 @@ func TestRefreshApiKeyAccountWithRegionDetectionPersistsRegion(t *testing.T) {
 	}
 	t.Fatal("seeded account ak-1 not found in persisted store")
 }
+
+// TestRefreshApiKeyAccountWithRegionDetectionSeedsProbeUsage pins the optimization:
+// when the probe succeeds, the wrapper must parse the probe's already-fetched
+// usage instead of re-issuing GetUsageLimits against the detected region. Only
+// eu-central-1 returns 200; the stub counts eu-central-1 host hits. Seeded = 1
+// (probe only); not seeded = 2 (probe + RefreshAccountInfo).
+func TestRefreshApiKeyAccountWithRegionDetectionSeedsProbeUsage(t *testing.T) {
+	if err := config.Init(t.TempDir() + "/config.json"); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	var euCentral1Hits int
+	kiroRestHttpStore.Store(&http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.URL.Host == "q.eu-central-1.amazonaws.com" {
+				euCentral1Hits++
+			}
+			code, body := http.StatusNotFound, "not found"
+			if req.URL.Host == "q.eu-central-1.amazonaws.com" {
+				code, body = 200, `{"userInfo":{"email":"probe@example.com","userId":"u1"}}`
+			}
+			return &http.Response{StatusCode: code, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+		}),
+	})
+	t.Cleanup(func() { InitKiroHttpClient("") })
+
+	acct := config.Account{ID: "ak-seed", AuthMethod: "api_key", KiroApiKey: "KEY-SEED", AccessToken: "KEY-SEED", Region: "us-east-1", Enabled: true}
+	if err := config.AddAccount(acct); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	info, _, err := refreshApiKeyAccountWithRegionDetection(&acct)
+	if err != nil {
+		t.Fatalf("expected success, got err %v", err)
+	}
+	if euCentral1Hits != 1 {
+		t.Fatalf("eu-central-1 host hits: want 1 (probe seeds usage, no re-fetch), got %d", euCentral1Hits)
+	}
+	if info == nil || info.Email != "probe@example.com" {
+		t.Fatalf("info.Email: want probe@example.com (parsed from probe usage), got %+v", info)
+	}
+}

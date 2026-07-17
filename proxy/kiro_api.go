@@ -254,8 +254,17 @@ func refreshApiKeyInfoWithRegionProbe(account *config.Account, hintRegion string
 // the account with its original region. The caller MUST run this in a goroutine
 // (it makes upstream calls).
 func refreshApiKeyAccountWithRegionDetection(account *config.Account) (info *config.AccountInfo, regionChanged bool, err error) {
-	if account != nil {
-		if _, detected, probeErr := refreshApiKeyInfoWithRegionProbe(account, account.Region); probeErr == nil && detected != "" && detected != account.Region {
+	if account == nil {
+		return nil, false, fmt.Errorf("refreshApiKeyAccountWithRegionDetection: nil account")
+	}
+	// Probe first. On success, seed AccountInfo from the probe's usage so we don't
+	// re-issue GetUsageLimits against the just-detected region (the prior code
+	// discarded usage then called RefreshAccountInfo, which fetched again). On a
+	// probe failure (all-miss or fatal) fall back to RefreshAccountInfo — it
+	// re-issues once but carries the error/ban-handling path; the common success
+	// path returns below without a second call.
+	if usage, detected, probeErr := refreshApiKeyInfoWithRegionProbe(account, account.Region); probeErr == nil && usage != nil {
+		if detected != "" && detected != account.Region {
 			account.Region = detected
 			account.ApiRegion = detected
 			if updateErr := config.UpdateAccount(account.ID, *account); updateErr != nil {
@@ -264,6 +273,7 @@ func refreshApiKeyAccountWithRegionDetection(account *config.Account) (info *con
 				regionChanged = true
 			}
 		}
+		return accountInfoFromUsage(usage), regionChanged, nil
 	}
 	info, err = RefreshAccountInfo(account)
 	return info, regionChanged, err
@@ -648,10 +658,6 @@ func setKiroHeaders(req *http.Request, account *config.Account) {
 
 // RefreshAccountInfo 刷新账户信息（使用量、订阅等）
 func RefreshAccountInfo(account *config.Account) (*config.AccountInfo, error) {
-	info := &config.AccountInfo{
-		LastRefresh: time.Now().Unix(),
-	}
-
 	// 获取使用量和订阅信息
 	usage, err := GetUsageLimits(account)
 	if err != nil {
@@ -710,6 +716,18 @@ func RefreshAccountInfo(account *config.Account) (*config.AccountInfo, error) {
 		if updateErr := config.UpdateAccount(account.ID, updatedAccount); updateErr != nil {
 			logger.Errorf("[RefreshAccountInfo] Failed to clear account ban status: %v", updateErr)
 		}
+	}
+
+	return accountInfoFromUsage(usage), nil
+}
+
+// accountInfoFromUsage populates an AccountInfo from a successful GetUsageLimits
+// response. Shared between RefreshAccountInfo (which fetches usage) and the
+// api_key region-detection wrapper (which already has usage from the probe) so
+// the wrapper does not re-issue GetUsageLimits against the just-detected region.
+func accountInfoFromUsage(usage *UsageLimitsResponse) *config.AccountInfo {
+	info := &config.AccountInfo{
+		LastRefresh: time.Now().Unix(),
 	}
 
 	// 解析用户信息
@@ -781,7 +799,7 @@ func RefreshAccountInfo(account *config.Account) (*config.AccountInfo, error) {
 		}
 	}
 
-	return info, nil
+	return info
 }
 
 func parseSubscriptionType(raw string) string {
