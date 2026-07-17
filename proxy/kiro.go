@@ -227,6 +227,10 @@ type InferenceConfig struct {
 	MaxTokens   int      `json:"maxTokens,omitempty"`
 	Temperature *float64 `json:"temperature,omitempty"`
 	TopP        float64  `json:"topP,omitempty"`
+	// Effort controls thinking depth + token spend on effort-capable models
+	// (Opus 4.8/4.7/4.6, Sonnet 5/4.6). Forwarded as inferenceConfig.effort.
+	// Dropped on models that reject it (Sonnet 4.5, Haiku 4.5, older).
+	Effort string `json:"effort,omitempty"`
 }
 
 // ==================== Stream Callbacks ====================
