@@ -162,3 +162,48 @@ func TestRefreshApiKeyInfoWithRegionProbeAllMiss(t *testing.T) {
 		t.Fatalf("region: want empty on miss, got %q", region)
 	}
 }
+
+// TestRefreshApiKeyAccountWithRegionDetectionPersistsRegion verifies the
+// single-import wrapper detects a new region, persists it via config.UpdateAccount,
+// returns regionChanged=true, and leaves the in-memory account updated. Only the
+// eu-central-1 host returns 200; us-east-1 (the account's starting region) 404s.
+func TestRefreshApiKeyAccountWithRegionDetectionPersistsRegion(t *testing.T) {
+	if err := config.Init(t.TempDir() + "/config.json"); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	kiroRestHttpStore.Store(&http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			code, body := http.StatusNotFound, "not found"
+			if req.URL.Host == "q.eu-central-1.amazonaws.com" {
+				code, body = 200, `{}`
+			}
+			return &http.Response{StatusCode: code, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+		}),
+	})
+	t.Cleanup(func() { InitKiroHttpClient("") })
+
+	acct := config.Account{ID: "ak-1", AuthMethod: "api_key", KiroApiKey: "KEY-1", AccessToken: "KEY-1", Region: "us-east-1", Enabled: true}
+	if err := config.AddAccount(acct); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	_, regionChanged, err := refreshApiKeyAccountWithRegionDetection(&acct)
+	if err != nil {
+		t.Fatalf("expected success, got err %v", err)
+	}
+	if !regionChanged {
+		t.Fatal("regionChanged: want true, got false")
+	}
+	if acct.Region != "eu-central-1" || acct.ApiRegion != "eu-central-1" {
+		t.Fatalf("in-memory account region not updated: Region=%q ApiRegion=%q", acct.Region, acct.ApiRegion)
+	}
+	for _, a := range config.GetAccounts() {
+		if a.ID == "ak-1" {
+			if a.Region != "eu-central-1" {
+				t.Fatalf("persisted Region: want eu-central-1, got %q", a.Region)
+			}
+			return
+		}
+	}
+	t.Fatal("seeded account ak-1 not found in persisted store")
+}

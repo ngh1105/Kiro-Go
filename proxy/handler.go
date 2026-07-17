@@ -2671,7 +2671,9 @@ func (h *Handler) apiAddAccount(w http.ResponseWriter, r *http.Request) {
 	h.pool.Reload()
 	// api_key: best-effort region detection + usage refresh (async). The probe
 	// persists a detected region and reloads the pool; a failure leaves the
-	// account with the user's region (or us-east-1 default).
+	// account with the user's region (or us-east-1 default). Model-cache is
+	// chained AFTER the probe so acc carries the detected region — otherwise the
+	// model fetch targets the stale-region host and 404s (self-heals next refresh).
 	if account.IsApiKeyCredential() {
 		go func(acc config.Account) {
 			_, regionChanged, infoErr := refreshApiKeyAccountWithRegionDetection(&acc)
@@ -2681,10 +2683,14 @@ func (h *Handler) apiAddAccount(w http.ResponseWriter, r *http.Request) {
 			if infoErr != nil {
 				logger.Warnf("[AddAccount] RefreshAccountInfo failed for api_key account %s: %v", accountEmailForLog(&acc), infoErr)
 			}
+			if acc.Enabled {
+				if err := h.fetchAndCacheAccountModels(&acc); err != nil {
+					logger.Warnf("[ModelsCache] Auto-refresh failed for new account %s: %v", accountEmailForLog(&acc), err)
+				}
+			}
 		}(account)
-	}
-	// 新账号若已启用且有 token，立即拉取并缓存模型列表
-	if account.Enabled && (account.AccessToken != "" || account.IsApiKeyCredential()) {
+	} else if account.Enabled && account.AccessToken != "" {
+		// 新账号若已启用且有 token，立即拉取并缓存模型列表
 		go func(acc config.Account) {
 			if err := h.fetchAndCacheAccountModels(&acc); err != nil {
 				logger.Warnf("[ModelsCache] Auto-refresh failed for new account %s: %v", accountEmailForLog(&acc), err)
@@ -3533,6 +3539,8 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		// Best-effort: populate email/usage/credit from upstream. RefreshAccountInfo
 		// uses KiroApiKey (mirrored into AccessToken) as the bearer via
 		// applyKiroBaseHeaders; profile-ARN resolution is skipped for api_key.
+		// Model-cache is chained after the probe so acc carries the detected region
+		// (avoids a stale-region 404 on the model fetch).
 		go func(acc config.Account) {
 			_, regionChanged, infoErr := refreshApiKeyAccountWithRegionDetection(&acc)
 			if regionChanged {
@@ -3541,8 +3549,6 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 			if infoErr != nil {
 				logger.Warnf("[Import] RefreshAccountInfo failed for api_key account %s: %v", accountEmailForLog(&acc), infoErr)
 			}
-		}(account)
-		go func(acc config.Account) {
 			if err := h.fetchAndCacheAccountModels(&acc); err != nil {
 				logger.Warnf("[ModelsCache] Auto-refresh failed for api_key account %s: %v", accountEmailForLog(&acc), err)
 			}
