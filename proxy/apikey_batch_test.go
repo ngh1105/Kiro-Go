@@ -163,3 +163,33 @@ func TestImportApiKeysDetectsBatchRegion(t *testing.T) {
 		}
 	}
 }
+
+// TestFirstImportableApiKeyKey locks in the batch-probe key selector: the first
+// non-empty key not already present in existing and not seen earlier in the
+// batch. Whitespace and blank lines are skipped; "" when nothing is importable.
+// Previously only covered transitively via TestImportApiKeysDetectsBatchRegion.
+func TestFirstImportableApiKeyKey(t *testing.T) {
+	existing := map[string]bool{"KEY-EXISTING-1234567890": true}
+
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"first importable", "KEY-FRESH-1234567890\nKEY-EXISTING-1234567890", "KEY-FRESH-1234567890"},
+		{"skip existing, take next", "KEY-EXISTING-1234567890\nKEY-NEXT-1234567890", "KEY-NEXT-1234567890"},
+		{"within-batch dup returns first", "KEY-DUP-1234567890\nKEY-DUP-1234567890", "KEY-DUP-1234567890"},
+		{"blank lines skipped", "\n\nKEY-AFTER-BLANK-1234567\n", "KEY-AFTER-BLANK-1234567"},
+		{"whitespace trimmed", "  KEY-TRIM-1234567890  ", "KEY-TRIM-1234567890"},
+		{"all empty", "\n  \n\t\n", ""},
+		{"only existing", "KEY-EXISTING-1234567890", ""},
+		{"empty raw", "", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := firstImportableApiKeyKey(c.raw, existing); got != c.want {
+				t.Fatalf("firstImportableApiKeyKey(%q): want %q, got %q", c.raw, c.want, got)
+			}
+		})
+	}
+}
