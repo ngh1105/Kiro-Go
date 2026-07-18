@@ -101,17 +101,21 @@
         </div>
         <nav class="header-nav" aria-label="" data-i18n-aria-label="aria.sections">
           <div class="tabs" id="tabBar">
-            <button type="button" class="tab active" data-tab="accounts"><i class="fa-solid fa-users tab-icon"></i><span
+            <button type="button" class="tab active" data-tab="accounts" aria-current="page"
+              data-i18n-title="tabs.accounts" data-i18n-aria-label="tabs.accounts"><i class="fa-solid fa-users tab-icon"></i><span
                 data-i18n="tabs.accounts"></span></button>
-            <button type="button" class="tab" data-tab="settings"><i class="fa-solid fa-sliders tab-icon"></i><span
+            <button type="button" class="tab" data-tab="settings" data-i18n-title="tabs.settings"
+              data-i18n-aria-label="tabs.settings"><i class="fa-solid fa-sliders tab-icon"></i><span
                 data-i18n="tabs.settings"></span></button>
-            <button type="button" class="tab" data-tab="api"><i class="fa-solid fa-plug tab-icon"></i><span
+            <button type="button" class="tab" data-tab="api" data-i18n-title="tabs.api"
+              data-i18n-aria-label="tabs.api"><i class="fa-solid fa-plug tab-icon"></i><span
                 data-i18n="tabs.api"></span></button>
-            <button type="button" class="tab" data-tab="logs"><i class="fa-solid fa-list tab-icon"></i><span
+            <button type="button" class="tab" data-tab="logs" data-i18n-title="tabs.logs"
+              data-i18n-aria-label="tabs.logs"><i class="fa-solid fa-list tab-icon"></i><span
                 data-i18n="tabs.logs"></span></button>
           </div>
         </nav>
-        <div class="topbar-actions flex-wrap justify-end">
+        <div class="topbar-actions justify-end">
           <div class="lang-switch" id="mainLangSwitch" role="group" aria-label="" data-i18n-aria-label="lang.label">
             <button class="lang-btn" data-lang="zh" type="button" data-i18n="lang.zh"></button>
             <button class="lang-btn" data-lang="en" type="button" data-i18n="lang.en"></button>
@@ -123,7 +127,8 @@
             <i class="fa-solid fa-moon theme-ico-dark"></i>
           </button>
           <span class="divider" aria-hidden="true"></span>
-          <button class="btn btn-outline btn-sm" id="logoutBtn">
+          <button class="btn btn-outline btn-sm" id="logoutBtn" data-i18n-title="common.logout"
+            data-i18n-aria-label="common.logout">
             <i class="fa-solid fa-right-from-bracket"></i>
             <span data-i18n="common.logout"></span>
           </button>
@@ -182,10 +187,14 @@
             <i class="fa-solid fa-circle-xmark stat-icon stat-icon--danger" aria-hidden="true"></i>
           </div>
         </div>
-        <div class="stat-card" id="sparklineCard" style="grid-column: span 2;">
-          <div class="stat-card-title" data-i18n="stats.recentTraffic"></div>
-          <div id="statsSparkline" class="stats-sparkline"></div>
-        </div>
+      </div>
+
+      <!-- Recent traffic: own full-width band below the 4 KPI cards.
+           Pulled out of stats-grid so the KPIs tile a clean row with no gap
+           and the live chart gets its own row instead of stretching one card. -->
+      <div class="traffic-band" id="sparklineCard">
+        <span class="traffic-band-label" data-i18n="stats.recentTraffic"></span>
+        <div id="statsSparkline" class="traffic-band-chart"></div>
       </div>
 
       <!-- Accounts tab -->
@@ -200,11 +209,14 @@
                 <span class="switch"><input type="checkbox" id="privacyModeToggle" checked /><span
                     class="slider"></span></span>
               </label>
-              <button class="btn btn-outline btn-sm" id="exportBtn"><i class="fa-solid fa-file-export"
+              <button class="btn btn-outline btn-sm" id="exportBtn" data-i18n-title="accounts.export"
+                data-i18n-aria-label="accounts.export"><i class="fa-solid fa-file-export"
                   aria-hidden="true"></i><span class="btn-text" data-i18n="accounts.export"></span></button>
-              <button class="btn btn-outline btn-sm" id="refreshAllModelsBtn"><i class="fa-solid fa-arrows-rotate"
+              <button class="btn btn-outline btn-sm" id="refreshAllModelsBtn" data-i18n-title="models.refreshAll"
+                data-i18n-aria-label="models.refreshAll"><i class="fa-solid fa-arrows-rotate"
                   aria-hidden="true"></i><span class="btn-text" data-i18n="models.refreshAll"></span></button>
-              <button class="btn btn-primary btn-sm" id="addAccountBtn"><i class="fa-solid fa-plus"
+              <button class="btn btn-primary btn-sm" id="addAccountBtn" data-i18n-title="accounts.add"
+                data-i18n-aria-label="accounts.add"><i class="fa-solid fa-plus"
                   aria-hidden="true"></i><span class="btn-text" data-i18n="accounts.add"></span></button>
             </div>
           </div>

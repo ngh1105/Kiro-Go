@@ -130,9 +130,12 @@
     await loadLocale(lang);
     applyTranslations();
     renderVersionBadge();
+    rebuildTagFilterOptions();
     renderAccounts();
+    renderApiKeys();
     renderPromptRules();
     renderLogs(logsCache);
+    renderSparkline();
   }
   function updateLangButtons() {
     qsa('.lang-btn').forEach(btn => btn.classList.toggle('active', btn.dataset.lang === currentLang));
@@ -780,11 +783,7 @@
   function renderSparkline() {
     const container = $('statsSparkline');
     if (!container) return;
-    const logs = logsCache;
-    if (!logs || !logs.length) {
-      container.innerHTML = '<span class="text-muted" style="font-size:0.75rem;">-</span>';
-      return;
-    }
+    const logs = logsCache || [];
     const bucketMs = 60 * 1000;
     const numBuckets = 16;
     const now = Date.now();
@@ -796,16 +795,31 @@
       const idx = Math.min(numBuckets - 1, Math.floor((ts - start) / bucketMs));
       if (idx >= 0) buckets[idx]++;
     }
-    const maxVal = Math.max(1, ...buckets);
+    const totalRecent = buckets.reduce((sum, count) => sum + count, 0);
+    const chartLabel = t('stats.recentTraffic') + ': ' + totalRecent + ' ' + t('stats.requests');
+    if (!totalRecent) {
+      const emptyLabel = '0 ' + t('stats.requests') + ' · 16 ' + t('time.minutes');
+      container.innerHTML = '<span class="traffic-band-empty" aria-label="' + escapeAttr(chartLabel) + '">' +
+        escapeHtml(emptyLabel) + '</span>';
+      return;
+    }
+    const maxVal = Math.max(...buckets);
     const barW = 100 / numBuckets;
+    const markW = barW * 0.32;
+    const markOffset = (barW - markW) / 2;
     let bars = '';
     buckets.forEach((count, i) => {
-      const h = (count / maxVal) * 100;
-      bars += '<rect x="' + (i * barW).toFixed(2) + '" y="' + (100 - h).toFixed(2) +
-        '" width="' + (barW * 0.7).toFixed(2) + '" height="' + h.toFixed(2) +
-        '" rx="1" fill="currentColor" opacity="' + (count > 0 ? '0.75' : '0.12') + '" />';
+      const h = (count / maxVal) * 86;
+      bars += '<rect x="' + (i * barW + markOffset).toFixed(2) + '" y="' + (100 - h).toFixed(2) +
+        '" width="' + markW.toFixed(2) + '" height="' + h.toFixed(2) +
+        '" rx="0.35" fill="currentColor" opacity="' + (count > 0 ? '0.78' : '0.12') + '">' +
+        '<title>-' + (numBuckets - i) + ' ' + escapeHtml(t('time.minutes')) + ' · ' + count + '</title></rect>';
     });
-    container.innerHTML = '<svg viewBox="0 0 100 100" preserveAspectRatio="none" style="width:100%;height:42px;color:var(--accent,#3b82f6);">' + bars + '</svg>';
+    const baseline = '<line x1="0" y1="99" x2="100" y2="99" stroke="currentColor" stroke-width="1" ' +
+      'vector-effect="non-scaling-stroke" opacity="0.14" />';
+    container.innerHTML = '<svg class="traffic-sparkline" viewBox="0 0 100 100" preserveAspectRatio="none" ' +
+      'role="img" aria-label="' + escapeAttr(chartLabel) + '" focusable="false"><title>' +
+      escapeHtml(chartLabel) + '</title>' + baseline + bars + '</svg>';
   }
 
   function renderLogs(logs) {
@@ -876,14 +890,14 @@
         detailCell = '<span class="text-muted">' + (l.credits ? (l.credits.toFixed(3) + ' cr') : '-') + '</span>';
       }
       html += '<tr>' +
-        '<td>' + escapeHtml(formatLogTime(l.time)) + '</td>' +
-        '<td>' + statusCell + '</td>' +
-        '<td>' + escapeHtml(l.endpoint) + '</td>' +
-        '<td>' + escapeHtml(l.model || '-') + '</td>' +
-        '<td>' + escapeHtml(accountLabel(l.accountId)) + '</td>' +
-        '<td>' + tokensCell(l) + '</td>' +
-        '<td>' + (l.duration ? (l.duration + 'ms') : '-') + '</td>' +
-        '<td>' + detailCell + '</td>' +
+        '<td data-label="' + escapeAttr(t('logs.time')) + '">' + escapeHtml(formatLogTime(l.time)) + '</td>' +
+        '<td data-label="' + escapeAttr(t('logs.status')) + '">' + statusCell + '</td>' +
+        '<td data-label="' + escapeAttr(t('logs.endpoint')) + '">' + escapeHtml(l.endpoint) + '</td>' +
+        '<td data-label="' + escapeAttr(t('logs.model')) + '">' + escapeHtml(l.model || '-') + '</td>' +
+        '<td data-label="' + escapeAttr(t('logs.account')) + '">' + escapeHtml(accountLabel(l.accountId)) + '</td>' +
+        '<td data-label="' + escapeAttr(t('logs.tokens')) + '">' + tokensCell(l) + '</td>' +
+        '<td data-label="' + escapeAttr(t('logs.duration')) + '">' + (l.duration ? (l.duration + 'ms') : '-') + '</td>' +
+        '<td data-label="' + escapeAttr(t('logs.detail')) + '">' + detailCell + '</td>' +
         '</tr>';
     }
     html += '</tbody></table>';
@@ -2088,7 +2102,7 @@
             disabled +
             '<span class="text-xs muted-text font-mono">' + masked + '</span>' +
           '</div>' +
-          '<div class="flex items-center gap-2">' +
+          '<div class="flex items-center gap-2 apikey-row-actions">' +
             '<label class="switch" title="' + escapeAttr(item.enabled ? t('accounts.disable') : t('accounts.enable')) + '">' +
               '<input type="checkbox" data-apikey-action="toggle" data-id="' + id + '"' + (item.enabled ? ' checked' : '') + ' />' +
               '<span class="slider"></span>' +
@@ -3456,7 +3470,12 @@
 
   // Tabs
   function switchTab(tab) {
-    qsa('.tab').forEach(el => el.classList.toggle('active', el.dataset.tab === tab));
+    qsa('.tab').forEach(el => {
+      const active = el.dataset.tab === tab;
+      el.classList.toggle('active', active);
+      if (active) el.setAttribute('aria-current', 'page');
+      else el.removeAttribute('aria-current');
+    });
     qsa('.tab-content').forEach(c => c.classList.add('hidden'));
     $('tab' + tab.charAt(0).toUpperCase() + tab.slice(1)).classList.remove('hidden');
     if (tab === 'logs') loadLogs();
