@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"kiro-go/config"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -614,6 +615,62 @@ func TestCacheChurnsAtLowCapacity(t *testing.T) {
 	}
 	if usage := tr.Compute("acct", profile); usage.CacheReadInputTokens != 0 {
 		t.Fatalf("expected oldest prefix churned at cap=4096; got cache_read=%d", usage.CacheReadInputTokens)
+	}
+}
+
+// TestPruneExpiredIsAmortised proves that pruneExpiredLocked respects the
+// pruneInterval guard: a second call made less than pruneInterval after the
+// first does NOT re-scan (the stale entry added between the two calls is NOT
+// removed). A third call made after the interval has elapsed IS a full scan
+// (the stale entry is removed and the expiration counter increments).
+func TestPruneExpiredIsAmortised(t *testing.T) {
+	tr := newPromptCacheTrackerWithCapacity(time.Hour, 1024)
+	now := time.Now()
+
+	var fp [32]byte
+	fp[0] = 0xAB
+
+	tr.mu.Lock()
+	// Insert an entry that is already expired at t=now.
+	tr.putLocked(fp, now.Add(-time.Second), time.Second)
+	tr.mu.Unlock()
+
+	// First Compute: triggers first prune (lastPruneAt is zero → elapsed > pruneInterval).
+	tr.mu.Lock()
+	before := atomic.LoadInt64(&tr.expirations)
+	tr.pruneExpiredLocked(now)
+	after := atomic.LoadInt64(&tr.expirations)
+	tr.mu.Unlock()
+	if after-before == 0 {
+		t.Fatal("first prune should have evicted the expired entry")
+	}
+
+	// Re-insert the same expired fingerprint.
+	tr.mu.Lock()
+	tr.putLocked(fp, now.Add(-time.Second), time.Second)
+	before2 := atomic.LoadInt64(&tr.expirations)
+	// Second prune: called just after first (well within pruneInterval) → skip.
+	tr.pruneExpiredLocked(now.Add(time.Millisecond))
+	after2 := atomic.LoadInt64(&tr.expirations)
+	tr.mu.Unlock()
+	if after2 != before2 {
+		t.Fatal("second prune within interval must be a no-op (amortised)")
+	}
+	if _, ok := tr.entries[fp]; !ok {
+		t.Fatal("re-inserted entry must still be present after skipped prune")
+	}
+
+	// Third prune: called after pruneInterval has elapsed → full scan removes it.
+	tr.mu.Lock()
+	before3 := atomic.LoadInt64(&tr.expirations)
+	tr.pruneExpiredLocked(now.Add(pruneInterval + time.Second))
+	after3 := atomic.LoadInt64(&tr.expirations)
+	tr.mu.Unlock()
+	if after3-before3 == 0 {
+		t.Fatal("prune after interval must have evicted the re-inserted expired entry")
+	}
+	if _, ok := tr.entries[fp]; ok {
+		t.Fatal("expired entry must be gone after full prune")
 	}
 }
 

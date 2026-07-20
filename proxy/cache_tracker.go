@@ -64,6 +64,12 @@ type promptCacheEntry struct {
 	lruElem   *list.Element // back-ref into t.order; Value = fingerprint [32]byte
 }
 
+// pruneInterval is how often pruneExpiredLocked is actually executed.
+// Callers invoke it on every Compute/Update, but the scan is O(n) over up
+// to 131072 entries; amortising to at most once per 10 s keeps the hot
+// path cheap while still evicting expired entries promptly.
+const pruneInterval = 10 * time.Second
+
 type promptCacheTracker struct {
 	mu              sync.Mutex
 	entries         map[[32]byte]*promptCacheEntry
@@ -75,6 +81,7 @@ type promptCacheTracker struct {
 	evictions       int64 // atomic — LRU pop-backs in evictOverflowLocked
 	expirations     int64 // atomic — TTL removals in pruneExpiredLocked
 	dirty           bool
+	lastPruneAt     time.Time // guards amortised prune cadence
 	stopChan        chan struct{}
 	stopOnce        sync.Once
 }
@@ -465,7 +472,15 @@ func (t *promptCacheTracker) Update(accountID string, profile *promptCacheProfil
 	t.evictOverflowLocked()
 }
 
+// pruneExpiredLocked evicts entries whose TTL has elapsed. The full O(n)
+// map scan is amortised to at most once per pruneInterval: skipped calls
+// simply return early, so the hot path (Compute/Update) is O(1) most of
+// the time. Caller holds t.mu.
 func (t *promptCacheTracker) pruneExpiredLocked(now time.Time) {
+	if now.Sub(t.lastPruneAt) < pruneInterval {
+		return
+	}
+	t.lastPruneAt = now
 	for fingerprint, entry := range t.entries {
 		if !entry.ExpiresAt.After(now) {
 			t.order.Remove(entry.lruElem)

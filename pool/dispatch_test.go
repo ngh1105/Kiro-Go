@@ -144,6 +144,62 @@ func TestLeastCooldownFallbackPreserved(t *testing.T) {
 	}
 }
 
+// TestFallbackSkipsNearExpiredTokenAccount proves that when all main-sweep
+// candidates are filtered out, the fallback loop does not fast-return an
+// account whose token is near expiry (ExpiresAt within the skew window)
+// over a cooling but token-valid account. Previously the else-branch
+// (no cooldown entry) returned immediately without checking token expiry,
+// so a token-expired account could win over a cooling valid-token one.
+func TestFallbackSkipsNearExpiredTokenAccount(t *testing.T) {
+	now := time.Now()
+	// "fresh" has a valid token but is on a 5-second cooldown.
+	// "stale" has no cooldown but its token expires in 30s (within the 120s skew).
+	fresh := config.Account{ID: "fresh", ExpiresAt: now.Unix() + 600}
+	stale := config.Account{ID: "stale", ExpiresAt: now.Unix() + 30}
+	p := &AccountPool{
+		accounts:     []config.Account{stale, fresh}, // stale listed first so it wins without the fix
+		cooldowns:    map[string]time.Time{"fresh": now.Add(5 * time.Second)},
+		errorCounts:  make(map[string]int),
+		modelLists:   make(map[string]map[string]bool),
+		runtimeStats: make(map[string]*accountRuntimeStats),
+	}
+
+	// All accounts fail the main sweep (fresh is cooling; stale has near-expired token).
+	acc := p.GetNextExcluding(nil)
+	if acc == nil {
+		t.Fatal("expected an account from fallback, got nil")
+	}
+	// The fallback must prefer "fresh" (cooling but token valid) over "stale"
+	// (no cooldown but token near-expired). Without the fix, "stale" is returned.
+	if acc.ID != "fresh" {
+		t.Fatalf("fallback must prefer cooling+token-valid 'fresh' over no-cooldown+near-expired 'stale', got %q", acc.ID)
+	}
+}
+
+// TestFallbackReturnsLastResortWhenNoTokenValidCooling proves that when every
+// account either has a near-expired token or no available token, the fallback
+// still returns a last-resort (no-cooldown, near-expired) account rather than
+// nil, so availability is preserved and the handler can refresh the token.
+func TestFallbackReturnsLastResortWhenNoTokenValidCooling(t *testing.T) {
+	now := time.Now()
+	// Both accounts have near-expired tokens; neither has a cooldown.
+	p := &AccountPool{
+		accounts: []config.Account{
+			{ID: "a", ExpiresAt: now.Unix() + 30},
+			{ID: "b", ExpiresAt: now.Unix() + 30},
+		},
+		cooldowns:    make(map[string]time.Time),
+		errorCounts:  make(map[string]int),
+		modelLists:   make(map[string]map[string]bool),
+		runtimeStats: make(map[string]*accountRuntimeStats),
+	}
+
+	acc := p.GetNextExcluding(nil)
+	if acc == nil {
+		t.Fatal("expected a last-resort account when all tokens are near-expired, got nil")
+	}
+}
+
 // TestSelectionSpansBothAccounts proves that across many selections without
 // finishing, the scheduler does not starve one account entirely (round-robin
 // fairness via recentSelectedCount tie-break once in-flight ties).

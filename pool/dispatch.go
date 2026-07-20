@@ -230,10 +230,15 @@ func (p *AccountPool) selectAccountLocked(model string, excluded map[string]bool
 	}
 
 	// Fallback: no account passed all hard filters (all cooling down). Return the
-	// eligible account (model + quota OK, not excluded) with the earliest cooldown
-	// so the caller still gets capacity rather than a hard 503.
+	// eligible account (model + quota OK, not excluded) with the earliest cooldown.
+	// Token-expiry is still checked: a near-expired account is tracked as a last
+	// resort only — a cooling but token-valid account is a better choice because
+	// the request handler will not need to do a synchronous refresh, whereas a
+	// token-expired account without a cooldown entry being fast-returned would
+	// silently win over a cooling valid-token account (the original bug).
 	var best *config.Account
 	var earliest time.Time
+	var lastResort *config.Account // no cooldown but token near-expiry; handler can refresh
 	for i := range p.accounts {
 		acc := &p.accounts[i]
 		if excluded != nil && excluded[acc.ID] {
@@ -245,20 +250,32 @@ func (p *AccountPool) selectAccountLocked(model string, excluded map[string]bool
 		if isQuotaBlocked(*acc, allowOverUsage) {
 			continue
 		}
+		tokenOK := acc.ExpiresAt == 0 || nowUnix <= acc.ExpiresAt-tokenRefreshSkewSeconds
 		if cooldown, ok := p.cooldowns[acc.ID]; ok {
-			if best == nil || cooldown.Before(earliest) {
+			// Only track cooling accounts with a valid token: a cooling +
+			// near-expired account would need both a cooldown wait AND a token
+			// refresh, making it worse than a plain last-resort candidate.
+			if tokenOK && (best == nil || cooldown.Before(earliest)) {
 				best = acc
 				earliest = cooldown
 			}
-		} else {
-			// No cooldown at all — prefer over any cooling-down account.
+		} else if tokenOK {
+			// No cooldown and token valid — immediate winner.
 			p.markAccountSelectedLocked(acc.ID, now)
 			return copyAccount(acc)
+		} else if lastResort == nil {
+			// No cooldown but token near-expiry — remember as last resort; the
+			// handler's ensureValidToken will refresh before the upstream call.
+			lastResort = acc
 		}
 	}
 	if best != nil {
 		p.markAccountSelectedLocked(best.ID, now)
 		return copyAccount(best)
+	}
+	if lastResort != nil {
+		p.markAccountSelectedLocked(lastResort.ID, now)
+		return copyAccount(lastResort)
 	}
 	return nil
 }
