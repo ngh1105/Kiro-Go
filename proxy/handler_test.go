@@ -471,10 +471,13 @@ func TestBuildAnthropicModelsResponseGeneratesThinkingVariants(t *testing.T) {
 	if len(models) != 2 {
 		t.Fatalf("expected base model and thinking variant, got %d", len(models))
 	}
-	if models[0]["id"] != "claude-sonnet-4.5" {
+	// Advertised ids are dash-form (claude-sonnet-4-5) so clients like Claude
+	// Code recognize the model and send output_config.effort; the dot-form
+	// cached id is normalized by advertiseModelID.
+	if models[0]["id"] != "claude-sonnet-4-5" {
 		t.Fatalf("unexpected base model id: %#v", models[0]["id"])
 	}
-	if models[1]["id"] != "claude-sonnet-4.5-thinking" {
+	if models[1]["id"] != "claude-sonnet-4-5-thinking" {
 		t.Fatalf("unexpected thinking model id: %#v", models[1]["id"])
 	}
 	if supportsImage, ok := models[0]["supports_image"].(bool); !ok || !supportsImage {

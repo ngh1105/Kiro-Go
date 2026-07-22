@@ -38,6 +38,100 @@ var modelAliases = []modelMapping{
 // (claude-sonnet-4-20250514) are not accidentally rewritten.
 var claudeVersionPattern = regexp.MustCompile(`claude-(opus|sonnet|haiku)-(\d+)-(\d{1,2})\b`)
 
+// claudeDotPattern reverses the Kiro DOT form ("claude-opus-4.8") back to the
+// dash form ("claude-opus-4-8") the Claude API (and Claude Code) expect.
+// Clients only send output_config.effort when they recognize a real dash-form id.
+var claudeDotPattern = regexp.MustCompile(`claude-(opus|sonnet|haiku)-(\d+)\.(\d{1,2})\b`)
+
+// advertiseModelID converts a Kiro DOT-form model id to dash form for the
+// client-facing model list. Effort is dropped by clients that don't recognize
+// the id as a real Claude model, so advertising the dash form is what makes
+// output_config.effort flow through at all.
+func advertiseModelID(modelID string) string {
+	return claudeDotPattern.ReplaceAllString(modelID, "claude-$1-$2-$3")
+}
+
+// effortCapableModels lists Kiro model ids (DOT form, the output of MapModel)
+// that accept output_config.effort upstream. Models missing from this list
+// (Sonnet 4.5, Haiku 4.5, older) error if effort is forwarded, so it is dropped
+// for them. Fable 5 is absent because Kiro upstream does not serve it.
+var effortCapableModels = map[string]bool{
+	"claude-opus-4.8":   true,
+	"claude-opus-4.7":   true,
+	"claude-opus-4.6":   true,
+	"claude-sonnet-5":   true,
+	"claude-sonnet-4.6": true,
+	// Opus 4.5 accepts effort but only low/medium/high — clampEffort handles that.
+	"claude-opus-4.5": true,
+}
+
+var validEffortLevels = map[string]bool{
+	"low": true, "medium": true, "high": true, "xhigh": true, "max": true,
+}
+
+// normalizeEffort lowercases + trims an effort value, returning "" for anything
+// outside the accepted set.
+func normalizeEffort(effort string) string {
+	e := strings.ToLower(strings.TrimSpace(effort))
+	if validEffortLevels[e] {
+		return e
+	}
+	return ""
+}
+
+// modelSupportsEffort reports whether the given (DOT-form) Kiro model id accepts
+// an effort field upstream at all.
+func modelSupportsEffort(modelID string) bool {
+	return effortCapableModels[strings.ToLower(strings.TrimSpace(modelID))]
+}
+
+// clampEffortForModel narrows an effort level to what the model accepts. Opus
+// 4.5 rejects xhigh/max, so those clamp to high; every other capable model
+// accepts the full range unchanged.
+func clampEffortForModel(effort, modelID string) string {
+	if strings.EqualFold(modelID, "claude-opus-4.5") {
+		if effort == "xhigh" || effort == "max" {
+			return "high"
+		}
+	}
+	return effort
+}
+
+// resolveEffortValue validates a raw effort string for the model and clamps it.
+// Returns "" when the value is invalid or the model does not accept effort
+// upstream. Shared core used by both the Claude (output_config.effort) and
+// OpenAI (reasoning_effort) paths.
+func resolveEffortValue(effort, modelID string) string {
+	e := normalizeEffort(effort)
+	if e == "" || !modelSupportsEffort(modelID) {
+		return ""
+	}
+	return clampEffortForModel(e, modelID)
+}
+
+// mapOpenAIReasoningEffort translates an OpenAI reasoning_effort value to a
+// Claude effort level. OpenAI has no xhigh/max, and "minimal" maps to "low".
+func mapOpenAIReasoningEffort(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "minimal":
+		return "low"
+	case "low", "medium", "high":
+		return strings.ToLower(strings.TrimSpace(s))
+	default:
+		return ""
+	}
+}
+
+// resolveEffort extracts a validated effort from a ClaudeRequest OutputConfig
+// and clamps it for the target model. Returns "" when the client sent nothing,
+// the value is invalid, or the model does not accept effort upstream.
+func resolveEffort(out *OutputConfig, modelID string) string {
+	if out == nil {
+		return ""
+	}
+	return resolveEffortValue(out.Effort, modelID)
+}
+
 // Thinking 模式提示
 const ThinkingModePrompt = `<thinking_mode>enabled</thinking_mode>
 <max_thinking_length>200000</max_thinking_length>`
@@ -120,16 +214,23 @@ func MapModel(model string) string {
 // ==================== Claude API 类型 ====================
 
 type ClaudeRequest struct {
-	Model       string                `json:"model"`
-	Messages    []ClaudeMessage       `json:"messages"`
-	MaxTokens   int                   `json:"max_tokens"`
-	Temperature *float64              `json:"temperature,omitempty"`
-	TopP        float64               `json:"top_p,omitempty"`
-	Stream      bool                  `json:"stream,omitempty"`
-	System      interface{}           `json:"system,omitempty"` // string or []SystemBlock
-	Thinking    *ClaudeThinkingConfig `json:"thinking,omitempty"`
-	Tools       []ClaudeTool          `json:"tools,omitempty"`
-	ToolChoice  interface{}           `json:"tool_choice,omitempty"`
+	Model        string                `json:"model"`
+	Messages     []ClaudeMessage       `json:"messages"`
+	MaxTokens    int                   `json:"max_tokens"`
+	Temperature  *float64              `json:"temperature,omitempty"`
+	TopP         float64               `json:"top_p,omitempty"`
+	Stream       bool                  `json:"stream,omitempty"`
+	System       interface{}           `json:"system,omitempty"` // string or []SystemBlock
+	Thinking     *ClaudeThinkingConfig `json:"thinking,omitempty"`
+	Tools        []ClaudeTool          `json:"tools,omitempty"`
+	ToolChoice   interface{}           `json:"tool_choice,omitempty"`
+	OutputConfig *OutputConfig         `json:"output_config,omitempty"`
+}
+
+// OutputConfig mirrors the Claude API output_config object. Only effort is
+// forwarded today; format is not (structured outputs not supported upstream).
+type OutputConfig struct {
+	Effort string `json:"effort,omitempty"`
 }
 
 type ClaudeThinkingConfig struct {
@@ -341,11 +442,17 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 		payload.ConversationState.History = history
 	}
 
-	if req.MaxTokens > 0 || req.Temperature != nil || req.TopP > 0 {
+	// Forward output_config.effort when the target model accepts it. resolveEffort
+	// validates the level and drops it (returns "") for models that 400 on effort
+	// upstream, so we never construct InferenceConfig for effort alone here unless
+	// the model is effort-capable.
+	effort := resolveEffort(req.OutputConfig, modelID)
+	if req.MaxTokens > 0 || req.Temperature != nil || req.TopP > 0 || effort != "" {
 		payload.InferenceConfig = &InferenceConfig{
 			MaxTokens:   req.MaxTokens,
 			Temperature: req.Temperature,
 			TopP:        req.TopP,
+			Effort:      effort,
 		}
 	}
 
@@ -988,13 +1095,14 @@ func KiroToClaudeResponse(content, thinkingContent string, includeEmptyThinkingB
 // ==================== OpenAI API 类型 ====================
 
 type OpenAIRequest struct {
-	Model       string          `json:"model"`
-	Messages    []OpenAIMessage `json:"messages"`
-	MaxTokens   int             `json:"max_tokens,omitempty"`
-	Temperature *float64        `json:"temperature,omitempty"`
-	TopP        float64         `json:"top_p,omitempty"`
-	Stream      bool            `json:"stream,omitempty"`
-	Tools       []OpenAITool    `json:"tools,omitempty"`
+	Model           string          `json:"model"`
+	Messages        []OpenAIMessage `json:"messages"`
+	MaxTokens       int             `json:"max_tokens,omitempty"`
+	Temperature     *float64        `json:"temperature,omitempty"`
+	TopP            float64         `json:"top_p,omitempty"`
+	Stream          bool            `json:"stream,omitempty"`
+	Tools           []OpenAITool    `json:"tools,omitempty"`
+	ReasoningEffort string          `json:"reasoning_effort,omitempty"`
 }
 
 type OpenAIMessage struct {
@@ -1289,11 +1397,15 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 		payload.ConversationState.History = history
 	}
 
-	if req.MaxTokens > 0 || req.Temperature != nil || req.TopP > 0 {
+	// Forward reasoning_effort (OpenAI) → inferenceConfig.effort when the target
+	// model accepts it. resolveEffortValue drops it for models that 400 upstream.
+	effort := resolveEffortValue(mapOpenAIReasoningEffort(req.ReasoningEffort), modelID)
+	if req.MaxTokens > 0 || req.Temperature != nil || req.TopP > 0 || effort != "" {
 		payload.InferenceConfig = &InferenceConfig{
 			MaxTokens:   req.MaxTokens,
 			Temperature: req.Temperature,
 			TopP:        req.TopP,
+			Effort:      effort,
 		}
 	}
 

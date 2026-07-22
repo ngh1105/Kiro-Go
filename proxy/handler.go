@@ -514,32 +514,42 @@ func buildAnthropicModelsResponse(cached []ModelInfo, thinkingSuffix string) []m
 	if len(cached) > 0 {
 		for _, m := range cached {
 			supportsImage := modelSupportsImage(m.InputTypes)
-			models = append(models, buildModelInfo(m.ModelId, "anthropic", supportsImage))
+			// Advertise the dash form (claude-opus-4-8) so clients like Claude Code
+			// recognize the model and send output_config.effort; ParseModelAndThinking
+			// normalizes back to Kiro's dot form upstream.
+			dashID := advertiseModelID(m.ModelId)
+			models = append(models, buildModelInfo(dashID, "anthropic", supportsImage))
 			// 自动生成 thinking 变体
-			models = append(models, buildModelInfo(m.ModelId+thinkingSuffix, "anthropic", supportsImage))
+			models = append(models, buildModelInfo(dashID+thinkingSuffix, "anthropic", supportsImage))
 		}
 	}
 	return models
 }
 
+// fallbackAnthropicModels advertises the dash-form ids (claude-opus-4-8) that
+// clients like Claude Code recognize and attach output_config.effort to.
+// ParseModelAndThinking normalizes back to Kiro's dot form upstream. fable-5 is
+// omitted because Kiro upstream does not serve it.
 func fallbackAnthropicModels(thinkingSuffix string) []map[string]interface{} {
 	return []map[string]interface{}{
-		buildModelInfo("claude-opus-4.8", "anthropic", true),
-		buildModelInfo("claude-opus-4.8"+thinkingSuffix, "anthropic", true),
-		buildModelInfo("claude-sonnet-4.6", "anthropic", true),
-		buildModelInfo("claude-sonnet-4.6"+thinkingSuffix, "anthropic", true),
-		buildModelInfo("claude-opus-4.6", "anthropic", true),
-		buildModelInfo("claude-opus-4.6"+thinkingSuffix, "anthropic", true),
-		buildModelInfo("claude-opus-4.7", "anthropic", true),
-		buildModelInfo("claude-opus-4.7"+thinkingSuffix, "anthropic", true),
-		buildModelInfo("claude-sonnet-4.5", "anthropic", true),
-		buildModelInfo("claude-sonnet-4.5"+thinkingSuffix, "anthropic", true),
+		buildModelInfo("claude-opus-4-8", "anthropic", true),
+		buildModelInfo("claude-opus-4-8"+thinkingSuffix, "anthropic", true),
+		buildModelInfo("claude-sonnet-5", "anthropic", true),
+		buildModelInfo("claude-sonnet-5"+thinkingSuffix, "anthropic", true),
+		buildModelInfo("claude-sonnet-4-6", "anthropic", true),
+		buildModelInfo("claude-sonnet-4-6"+thinkingSuffix, "anthropic", true),
+		buildModelInfo("claude-opus-4-6", "anthropic", true),
+		buildModelInfo("claude-opus-4-6"+thinkingSuffix, "anthropic", true),
+		buildModelInfo("claude-opus-4-7", "anthropic", true),
+		buildModelInfo("claude-opus-4-7"+thinkingSuffix, "anthropic", true),
+		buildModelInfo("claude-sonnet-4-5", "anthropic", true),
+		buildModelInfo("claude-sonnet-4-5"+thinkingSuffix, "anthropic", true),
 		buildModelInfo("claude-sonnet-4", "anthropic", true),
 		buildModelInfo("claude-sonnet-4"+thinkingSuffix, "anthropic", true),
-		buildModelInfo("claude-haiku-4.5", "anthropic", true),
-		buildModelInfo("claude-haiku-4.5"+thinkingSuffix, "anthropic", true),
-		buildModelInfo("claude-opus-4.5", "anthropic", true),
-		buildModelInfo("claude-opus-4.5"+thinkingSuffix, "anthropic", true),
+		buildModelInfo("claude-haiku-4-5", "anthropic", true),
+		buildModelInfo("claude-haiku-4-5"+thinkingSuffix, "anthropic", true),
+		buildModelInfo("claude-opus-4-5", "anthropic", true),
+		buildModelInfo("claude-opus-4-5"+thinkingSuffix, "anthropic", true),
 	}
 }
 
