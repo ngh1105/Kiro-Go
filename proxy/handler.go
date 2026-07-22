@@ -3502,60 +3502,109 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 
 	// api_key: import a Kiro API key used directly as bearer (no OAuth refresh,
 	// no profile ARN). Mirror the key into AccessToken for pool/dispatch/metrics
-	// compatibility. Best-effort RefreshAccountInfo populates email/usage/credit.
+	// compatibility. When region is omitted, probe all candidate regions and add
+	// one account per working region (multi-region key → multi pool slots).
 	if req.KiroApiKey != "" || strings.EqualFold(req.AuthMethod, "api_key") || strings.EqualFold(req.AuthMethod, "apikey") {
 		if req.KiroApiKey == "" {
 			w.WriteHeader(400)
 			json.NewEncoder(w).Encode(map[string]string{"error": "kiroApiKey is required for api_key accounts"})
 			return
 		}
-		if req.Region == "" {
-			req.Region = "us-east-1"
+
+		// Determine target regions: explicit → trusted (no probe); omitted → probe all candidates.
+		var targetRegions []string
+		probeRegions := false
+		if explicit := strings.TrimSpace(req.Region); explicit != "" {
+			targetRegions = []string{explicit}
+		} else {
+			targetRegions = apiKeyRegionCandidates("")
+			probeRegions = true
 		}
-		id := req.ID
-		if id == "" || config.AccountIDExists(id) {
-			id = auth.GenerateAccountID()
+
+		type addedEntry struct {
+			ID        string `json:"id"`
+			Region    string `json:"region"`
+			Duplicate bool   `json:"duplicate,omitempty"`
 		}
-		account := config.Account{
-			ID:          id,
-			Email:       req.Email,
-			Nickname:    req.Nickname,
-			AuthMethod:  "api_key",
-			KiroApiKey:  req.KiroApiKey,
-			AccessToken: req.KiroApiKey,
-			Region:      req.Region,
-			AuthRegion:  req.AuthRegion,
-			ApiRegion:   req.ApiRegion,
-			ExpiresAt:   0,
-			Enabled:     true,
-			MachineId:   config.GenerateMachineId(),
+		added := make([]addedEntry, 0, len(targetRegions))
+		skipped := make([]map[string]string, 0)
+		var warm []config.Account
+
+		for _, region := range targetRegions {
+			// Idempotency per (key, region).
+			if existing := findApiKeyAccountByRegion(req.KiroApiKey, region); existing != nil {
+				added = append(added, addedEntry{ID: existing.ID, Region: region, Duplicate: true})
+				continue
+			}
+			// Probe: skip regions the key cannot serve.
+			if probeRegions {
+				probe := &config.Account{
+					KiroApiKey:  req.KiroApiKey,
+					AccessToken: req.KiroApiKey,
+					AuthMethod:  "api_key",
+					Region:      region,
+					ApiRegion:   region,
+				}
+				if _, err := GetUsageLimits(probe); err != nil {
+					if apiKeyProbeFatal(err) {
+						skipped = append(skipped, map[string]string{"region": region, "error": err.Error()})
+						break
+					}
+					skipped = append(skipped, map[string]string{"region": region, "error": err.Error()})
+					continue
+				}
+			}
+			id := req.ID
+			if id == "" || config.AccountIDExists(id) {
+				id = auth.GenerateAccountID()
+			}
+			account := config.Account{
+				ID:          id,
+				Email:       req.Email,
+				Nickname:    req.Nickname,
+				AuthMethod:  "api_key",
+				KiroApiKey:  req.KiroApiKey,
+				AccessToken: req.KiroApiKey,
+				Region:      region,
+				AuthRegion:  req.AuthRegion,
+				ApiRegion:   region,
+				ExpiresAt:   0,
+				Enabled:     true,
+				MachineId:   config.GenerateMachineId(),
+			}
+			if err := config.AddAccount(account); err != nil {
+				skipped = append(skipped, map[string]string{"region": region, "error": err.Error()})
+				continue
+			}
+			added = append(added, addedEntry{ID: account.ID, Region: region})
+			warm = append(warm, account)
+			// Only use req.ID for the first account; subsequent regions get fresh IDs.
+			req.ID = ""
 		}
-		if err := config.AddAccount(account); err != nil {
-			w.WriteHeader(500)
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+
+		if len(added) == 0 {
+			w.WriteHeader(http.StatusBadGateway)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "kiroApiKey not usable in any probed region",
+				"skipped": skipped,
+			})
 			return
 		}
+
 		h.pool.Reload()
-		// Best-effort: populate email/usage/credit from upstream. RefreshAccountInfo
-		// uses KiroApiKey (mirrored into AccessToken) as the bearer via
-		// applyKiroBaseHeaders; profile-ARN resolution is skipped for api_key.
-		// Model-cache is chained after the probe so acc carries the detected region
-		// (avoids a stale-region 404 on the model fetch).
-		go func(acc config.Account) {
-			_, regionChanged, infoErr := refreshApiKeyAccountWithRegionDetection(&acc)
-			if regionChanged {
-				h.pool.Reload()
-			}
-			if infoErr != nil {
-				logger.Warnf("[Import] RefreshAccountInfo failed for api_key account %s: %v", accountEmailForLog(&acc), infoErr)
-			}
-			if err := h.fetchAndCacheAccountModels(&acc); err != nil {
-				logger.Warnf("[ModelsCache] Auto-refresh failed for api_key account %s: %v", accountEmailForLog(&acc), err)
-			}
-		}(account)
+		for _, acc := range warm {
+			go func(a config.Account) {
+				if infoErr := refreshAndCacheApiKeyAccount(h, &a); infoErr != nil {
+					logger.Warnf("[Import] refresh failed for api_key account %s (%s): %v", accountEmailForLog(&a), a.Region, infoErr)
+				}
+			}(acc)
+		}
+
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
-			"account": map[string]interface{}{"id": account.ID, "email": account.Email},
+			"added":   added,
+			"skipped": skipped,
 		})
 		return
 	}

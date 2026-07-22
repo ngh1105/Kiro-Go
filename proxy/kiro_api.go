@@ -279,6 +279,35 @@ func refreshApiKeyAccountWithRegionDetection(account *config.Account) (info *con
 	return info, regionChanged, err
 }
 
+// findApiKeyAccountByRegion returns a pointer to an existing api_key account
+// matching the given key and region, or nil. Used for per-(key,region) idempotency
+// when importing multi-region api keys.
+func findApiKeyAccountByRegion(key, region string) *config.Account {
+	for _, a := range config.GetAccounts() {
+		if a.KiroApiKey == key && strings.EqualFold(strings.TrimSpace(a.Region), strings.TrimSpace(region)) {
+			cp := a
+			return &cp
+		}
+	}
+	return nil
+}
+
+// refreshAndCacheApiKeyAccount runs best-effort region detection + info refresh +
+// model cache warm for a newly-imported api_key account.
+func refreshAndCacheApiKeyAccount(h *Handler, acc *config.Account) error {
+	_, regionChanged, infoErr := refreshApiKeyAccountWithRegionDetection(acc)
+	if regionChanged {
+		h.pool.Reload()
+	}
+	if infoErr != nil {
+		logger.Warnf("[Import] RefreshAccountInfo failed for api_key account %s: %v", accountEmailForLog(acc), infoErr)
+	}
+	if err := h.fetchAndCacheAccountModels(acc); err != nil {
+		logger.Warnf("[ModelsCache] Auto-refresh failed for api_key account %s: %v", accountEmailForLog(acc), err)
+	}
+	return infoErr
+}
+
 // GetUsageLimits 获取账户使用量和订阅信息
 func GetUsageLimits(account *config.Account) (*UsageLimitsResponse, error) {
 	if err := ensureRestProfileArn(account); err != nil {
